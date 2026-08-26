@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.7.0
+ * Version: 0.8.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> Krmizi series index -> verified
@@ -15,7 +15,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.7.0";
+var VERSION = "0.8.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SITE_BASES = [
   "https://www.qrmzi.tv",
@@ -535,13 +535,16 @@ function verifyEpisodePage(series, episodeCandidate, wantedSeason, wantedEpisode
 
 function qualityFromText(value) {
   var text = String(value || "").toLowerCase();
-  if (/2160|4k|uhd/.test(text)) return "4K";
-  if (/1080|full\s*hd|\bfhd\b/.test(text)) return "1080p";
-  if (/720/.test(text)) return "720p";
-  if (/576/.test(text)) return "576p";
-  if (/480|\bsd\b/.test(text)) return "480p";
-  if (/360|mobile/.test(text)) return "360p";
-  if (/320/.test(text)) return "320p";
+  function hasResolutionToken(height) {
+    return new RegExp("(^|[^a-z0-9])" + height + "p?(?=$|[^a-z0-9])", "i").test(text);
+  }
+  if (hasResolutionToken("2160") || /(^|[^a-z0-9])4k(?=$|[^a-z0-9])|\buhd\b/.test(text)) return "4K";
+  if (hasResolutionToken("1080") || /full\s*hd|\bfhd\b/.test(text)) return "1080p";
+  if (hasResolutionToken("720")) return "720p";
+  if (hasResolutionToken("576")) return "576p";
+  if (hasResolutionToken("480") || /\bsd\b/.test(text)) return "480p";
+  if (hasResolutionToken("360") || /\bmobile\b/.test(text)) return "360p";
+  if (hasResolutionToken("320")) return "320p";
   return "";
 }
 
@@ -555,17 +558,6 @@ function qualityFromResolution(widthValue, heightValue) {
   if (height >= 460) return "480p";
   if (height >= 340) return "360p";
   return height ? height + "p" : "";
-}
-
-function qualityFromBandwidth(value) {
-  var bandwidth = parseInt(value, 10) || 0;
-  if (bandwidth >= 12000000) return "4K";
-  if (bandwidth >= 4500000) return "1080p";
-  if (bandwidth >= 1800000) return "720p";
-  if (bandwidth >= 1000000) return "576p";
-  if (bandwidth >= 600000) return "480p";
-  if (bandwidth > 0) return "360p";
-  return "";
 }
 
 function qualityRank(quality) {
@@ -611,8 +603,7 @@ function parseHlsMaster(text, masterUrl) {
     if (lines[i].indexOf("#EXT-X-STREAM-INF:") !== 0) continue;
     var info = lines[i];
     var resolution = info.match(/RESOLUTION=(\d+)x(\d+)/i);
-    var bandwidth = info.match(/(?:AVERAGE-)?BANDWIDTH=(\d+)/i);
-    var quality = resolution ? qualityFromResolution(resolution[1], resolution[2]) : qualityFromBandwidth(bandwidth ? bandwidth[1] : "");
+    var quality = resolution ? qualityFromResolution(resolution[1], resolution[2]) : qualityFromText(info);
 
     var next = i + 1;
     while (next < lines.length && (!lines[next].trim() || lines[next].charAt(0) === "#")) next++;
@@ -621,6 +612,46 @@ function parseHlsMaster(text, masterUrl) {
     if (url) variants.push({ url: url, quality: quality || qualityFromText(url) });
   }
   return variants;
+}
+
+/*
+ * The CDN family used by AnaPlayer publishes its available rendition set in
+ * the master URL itself, for example: video_,l,n,h,x,.urlset/master.m3u8.
+ * Expanding this deterministic form avoids losing qualities when Nuvio can
+ * play the media but its sandbox cannot read the master playlist response.
+ */
+function variantsFromEncodedMaster(masterUrl) {
+  var value = String(masterUrl || "");
+  var match = value.match(/^(https?:\/\/[^?#]+\/)([^\/?#]+)_((?:,[a-z0-9]+)+),?\.urlset\/master\.m3u8(\?[^#]*)?$/i);
+  if (!match) return [];
+
+  var qualities = { l: "360p", n: "480p", h: "720p", x: "1080p" };
+  var codes = match[3].split(",");
+  var variants = [];
+  var seen = {};
+  for (var i = 0; i < codes.length; i++) {
+    var code = String(codes[i] || "").toLowerCase();
+    if (!qualities[code] || seen[code]) continue;
+    seen[code] = true;
+    variants.push({
+      url: match[1] + match[2] + "_" + code + "/index-v1-a1.m3u8" + (match[4] || ""),
+      quality: qualities[code]
+    });
+  }
+  return variants;
+}
+
+function isMasterPlaylistUrl(url) {
+  return /(?:master\.m3u8|\.urlset\/)/i.test(String(url || ""));
+}
+
+function isHlsPlaylistText(text) {
+  return /^\s*#EXTM3U(?:\s|$)/i.test(String(text || "").replace(/^\uFEFF/, ""));
+}
+
+function reliableHlsSource(url, referer, serverName) {
+  var identity = String(url || "") + " " + String(referer || "") + " " + String(serverName || "");
+  return /cdnplus(?:\.space)?|dailymotion|dai\.ly|dmcdn/i.test(identity);
 }
 
 function unescapePackedString(value) {
@@ -737,8 +768,27 @@ function addMediaEntry(entry, referer, serverName, streams, seenStreams) {
   var declaredQuality = entry.quality || qualityFromText(serverName) || qualityFromText(url);
 
   if (!/\.m3u8(?:[?#]|$)/i.test(url)) {
+    if (!declaredQuality) return Promise.resolve();
     seenStreams[url] = true;
     streams.push(streamObject(url, referer, declaredQuality, serverName));
+    return Promise.resolve();
+  }
+
+  var encodedVariants = variantsFromEncodedMaster(url);
+  if (encodedVariants.length) {
+    seenStreams[url] = true;
+    if (!reliableHlsSource(url, referer, serverName)) return Promise.resolve();
+    for (var encodedIndex = 0; encodedIndex < encodedVariants.length; encodedIndex++) {
+      var encoded = encodedVariants[encodedIndex];
+      if (seenStreams[encoded.url]) continue;
+      seenStreams[encoded.url] = true;
+      streams.push(streamObject(encoded.url, referer, encoded.quality, serverName));
+    }
+    return Promise.resolve();
+  }
+
+  if (!reliableHlsSource(url, referer, serverName)) {
+    seenStreams[url] = true;
     return Promise.resolve();
   }
 
@@ -750,7 +800,7 @@ function addMediaEntry(entry, referer, serverName, streams, seenStreams) {
   ).then(function (result) {
     var variants = parseHlsMaster(result.html, url);
     if (!variants.length) {
-      if (!seenStreams[url]) {
+      if (declaredQuality && !isMasterPlaylistUrl(url) && isHlsPlaylistText(result.html) && !seenStreams[url]) {
         seenStreams[url] = true;
         streams.push(streamObject(url, referer, declaredQuality, serverName));
       }
@@ -758,16 +808,11 @@ function addMediaEntry(entry, referer, serverName, streams, seenStreams) {
     }
 
     for (var i = 0; i < variants.length; i++) {
-      if (seenStreams[variants[i].url]) continue;
+      if (!variants[i].quality || seenStreams[variants[i].url]) continue;
       seenStreams[variants[i].url] = true;
       streams.push(streamObject(variants[i].url, referer, variants[i].quality, serverName));
     }
-  }).catch(function () {
-    if (!seenStreams[url]) {
-      seenStreams[url] = true;
-      streams.push(streamObject(url, referer, declaredQuality, serverName));
-    }
-  });
+  }).catch(function () {});
 }
 
 function resolveDailymotion(url, referer, serverName, streams, seenStreams) {
