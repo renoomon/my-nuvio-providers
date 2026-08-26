@@ -1,6 +1,6 @@
 {
   "name": "My Nuvio Providers",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Custom Nuvio providers by renoomon",
   "author": "renoomon",
   "scrapers": [
@@ -8,7 +8,7 @@
       "id": "krmizi",
       "name": "Krmizi | قرمزي",
       "description": "Turkish series with Arabic subtitles from krmizi.onl",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "filename": "providers/krmizi.js",
       "supportedTypes": [
         "tv"
