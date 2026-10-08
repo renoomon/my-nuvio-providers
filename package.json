@@ -1,0 +1,6 @@
+{
+  "name": "my-nuvio-providers",
+  "private": true,
+  "scripts": { "test": "node --test tests/*.test.js" },
+  "devDependencies": { "cheerio-without-node-native": "0.20.2" }
+}
