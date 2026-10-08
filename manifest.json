@@ -1,14 +1,14 @@
 {
   "name": "My Nuvio Providers",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Custom Nuvio providers by renoomon",
   "author": "renoomon",
   "scrapers": [
     {
       "id": "krmizi",
       "name": "Krmizi | قرمزي",
-      "description": "Verified TMDB-to-Krmizi matching with exact episodes and verified stream qualities",
-      "version": "0.8.0",
+      "description": "TMDB season-to-absolute episode matching, paginated discovery, and highest available stream qualities",
+      "version": "0.9.0",
       "filename": "providers/krmizi.js",
       "supportedTypes": [
         "tv"
