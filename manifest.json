@@ -1,14 +1,14 @@
 {
   "name": "My Nuvio Providers",
-  "version": "1.5.0",
-  "description": "Custom Nuvio providers by renoomon",
+  "version": "1.6.0",
+  "description": "Turkish series with automatic Krmizi, ShoofLive and Qisat fallback",
   "author": "renoomon",
   "scrapers": [
     {
       "id": "krmizi",
-      "name": "Krmizi | قرمزي",
-      "description": "Verified TMDB-to-Krmizi matching with exact episodes and verified stream qualities",
-      "version": "0.8.0",
+      "name": "Krmizi + ShoofLive + Qisat | مسلسلات تركية",
+      "description": "Automatic source fallback, season-to-absolute episode matching and playlist-derived qualities",
+      "version": "0.9.0",
       "filename": "providers/krmizi.js",
       "supportedTypes": [
         "tv"

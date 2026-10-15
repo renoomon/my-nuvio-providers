@@ -1,11 +1,12 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.8.0
+ * Version: 0.9.0
  *
  * Accuracy-first flow:
- * TMDB localized + alternative titles -> Krmizi series index -> verified
+ * TMDB localized + alternative titles -> ordered source search -> verified
  * series page -> exact episode inside that page -> page-owned player ->
- * AnaPlayer servers for that episode only -> public HLS/MP4 sources.
+ * AlbaPlayer servers for that episode only -> public HLS/MP4 sources.
+ * Krmizi -> ShoofLive -> Qisat; advance only when the source returns no streams.
  *
  * The provider never crawls related posts or arbitrary page links. It uses
  * Promise chains and the modules exposed by Nuvio's QuickJS/Hermes runtime.
@@ -15,13 +16,15 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.8.0";
+var VERSION = "0.9.0";
 var TMDB_BASE = "https://www.themoviedb.org";
-var SITE_BASES = [
-  "https://www.qrmzi.tv",
-  "https://krmizi.onl",
-  "https://v2.qrmzi.website"
+var SOURCES = [
+  { name: "Krmizi", bases: ["https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
+  { name: "ShoofLive", bases: ["https://s5.shooflive.cyou", "https://shooflive.net"], index: "/turkish-series/" },
+  { name: "Qisat", bases: ["https://www.qisat.tv", "https://v1.qisat.sbs"], index: "/all-turkish-series/" }
 ];
+var SITE_BASES = SOURCES[0].bases;
+var MAX_INDEX_PAGES = 6;
 var UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 var MAX_SERIES_PROBES = 6;
 var MAX_SERVERS = 8;
@@ -82,7 +85,15 @@ function absUrl(value, base) {
   if (cleanBase.charAt(cleanBase.length - 1) !== "/") {
     cleanBase = cleanBase.substring(0, cleanBase.lastIndexOf("/") + 1);
   }
-  return cleanBase + url;
+  var combined = cleanBase + url;
+  var prefix = originOf(combined);
+  var parts = combined.substring(prefix.length).split("/");
+  var resolved = [];
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] === "..") resolved.pop();
+    else if (parts[i] !== ".") resolved.push(parts[i]);
+  }
+  return prefix + resolved.join("/");
 }
 
 function urlKey(url) {
@@ -154,6 +165,7 @@ function wrap($, element) {
 
 function normalize(value) {
   return decodeHtml(value)
+    .replace(/İ/g, "I")
     .toLowerCase()
     .replace(/[إأآٱا]/g, "ا")
     .replace(/ى/g, "ي")
@@ -268,7 +280,7 @@ function parseTmdbAlternativeTitles(html) {
   return titles;
 }
 
-function getTmdbMetadata(tmdbId) {
+function getTmdbHtmlMetadata(tmdbId) {
   var languages = ["tr-TR", "en-US", "ar-SA"];
   var pageJobs = [];
   for (var i = 0; i < languages.length; i++) {
@@ -308,12 +320,40 @@ function getTmdbMetadata(tmdbId) {
   });
 }
 
+/* Nuvio supplies its TMDB key at runtime. Prefer JSON over the blocked website. */
+function getTmdbMetadata(tmdbId) {
+  var key = typeof TMDB_API_KEY !== "undefined" ? String(TMDB_API_KEY || "").trim() : "";
+  if (!key) return getTmdbHtmlMetadata(tmdbId);
+  var languages = ["ar-SA", "tr-TR", "en-US"];
+  var jobs = [];
+  for (var i = 0; i < languages.length; i++) {
+    jobs.push(fetchJson("https://api.themoviedb.org/3/tv/" + encodeURIComponent(tmdbId) +
+      "?api_key=" + encodeURIComponent(key) + "&language=" + languages[i] +
+      "&append_to_response=alternative_titles", "", "").catch(function () { return null; }));
+  }
+  return Promise.all(jobs).then(function (pages) {
+    var titles = [], seen = {}, seasons = [], year = 0;
+    for (var p = 0; p < pages.length; p++) {
+      var data = pages[p];
+      if (!data) continue;
+      addTitle(titles, seen, data.name);
+      addTitle(titles, seen, data.original_name);
+      if (!year && data.first_air_date) year = parseInt(data.first_air_date, 10) || 0;
+      if (!seasons.length && data.seasons) seasons = data.seasons;
+      var aliases = data.alternative_titles && data.alternative_titles.results || [];
+      for (var a = 0; a < aliases.length && titles.length < 50; a++) addTitle(titles, seen, aliases[a].title);
+    }
+    if (!titles.length) return getTmdbHtmlMetadata(tmdbId);
+    return { titles: titles, year: year, seasons: seasons };
+  });
+}
+
 function parseSeriesCards(html, pageUrl, titles) {
   var $ = cheerio.load(html);
   var cards = [];
   var seen = {};
 
-  $('article.postEp a[href*="/series/"]').each(function (_, element) {
+  $('article.postEp a[href*="/series/"], a.slv2-card[href*="/series/"]').each(function (_, element) {
     var anchor = wrap($, element);
     var url = absUrl(anchor.attr("href"), pageUrl);
     if (!url || seen[urlKey(url)]) return;
@@ -330,7 +370,7 @@ function parseSeriesCards(html, pageUrl, titles) {
     for (var h = 0; h < headingFields.length; h++) {
       headingScore = Math.max(headingScore, fieldMatchScore(headingFields[h], titles));
     }
-    var posterScore = Math.max(fieldMatchScore(poster, titles), fieldMatchScore(url, titles));
+    var posterScore = Math.max(fieldMatchScore(urlKey(poster), titles), fieldMatchScore(urlKey(url), titles));
     var score = headingScore;
     if (posterScore >= 80) score = Math.max(score, 105);
 
@@ -409,30 +449,82 @@ function verifyRankedCards(cards, titles, indexUrl) {
   return next();
 }
 
-function resolveSeries(metadata) {
+function nextIndexPage(html, pageUrl, indexPath) {
+  var $ = cheerio.load(html);
+  var next = "", current = pathKey(pageUrl);
+  var currentMatch = current.match(/\/page\/(\d+)$/);
+  var currentNumber = currentMatch ? parseInt(currentMatch[1], 10) : 1;
+  $('a[href]').each(function (_, element) {
+    var url = absUrl(wrap($, element).attr("href"), pageUrl);
+    var path = pathKey(url);
+    var match = path.match(/\/page\/(\d+)$/);
+    if (originOf(url) === originOf(pageUrl) && path.indexOf(indexPath.replace(/\/$/, "")) === 0 &&
+        match && parseInt(match[1], 10) === currentNumber + 1) next = url;
+  });
+  return next;
+}
+
+function resolveSeries(metadata, source) {
+  source = source || SOURCES[0];
   var baseIndex = 0;
-
   function nextBase() {
-    if (baseIndex >= SITE_BASES.length) return Promise.resolve(null);
-    var base = SITE_BASES[baseIndex++];
-    var indexUrl = base + "/all-turkish-series/";
-
-    return fetchTextInfo(indexUrl, base + "/", "").then(function (result) {
-      var cards = parseSeriesCards(result.html, result.url, metadata.titles);
-      if (!cards.length) return nextBase();
-      return verifyRankedCards(cards, metadata.titles, result.url).then(function (series) {
-        if (series) return series;
-        return nextBase();
-      });
-    }).catch(function (error) {
-      if (errorMessage(error).indexOf("cloudflare_challenge") === 0) {
-        logFailure("cloudflare_challenge", originOf(indexUrl));
-      }
-      return nextBase();
-    });
+    if (baseIndex >= source.bases.length) return Promise.resolve(null);
+    var base = source.bases[baseIndex++];
+    var queries = metadata.titles.slice(0, 4);
+    var queryIndex = 0;
+    function search() {
+      if (queryIndex >= queries.length) return index(base + source.index, 0);
+      var url = base + "/?s=" + encodeURIComponent(queries[queryIndex++]);
+      return fetchTextInfo(url, base + "/", "").then(function (result) {
+        return verifyRankedCards(parseSeriesCards(result.html, result.url, metadata.titles), metadata.titles, result.url);
+      }).then(function (series) { return series || search(); }).catch(function () { return nextBase(); });
+    }
+    function index(url, count) {
+      if (!url || count >= MAX_INDEX_PAGES) return Promise.resolve(null);
+      return fetchTextInfo(url, base + "/", "").then(function (result) {
+        return verifyRankedCards(parseSeriesCards(result.html, result.url, metadata.titles), metadata.titles, result.url)
+          .then(function (series) {
+            return series || index(nextIndexPage(result.html, result.url, source.index), count + 1);
+          });
+      }).catch(function () { return null; });
+    }
+    return search().then(function (series) { return series || nextBase(); });
   }
-
   return nextBase();
+}
+
+/* Map season-local requests to the continuous numbering used by Turkish sites.
+ * Season finale markers belong to this verified series, never related posts.
+ */
+function siteEpisodeRequest(series, metadata, season, episode) {
+  if (season === 1) return { season: season, episode: episode };
+  var $ = cheerio.load(series.html), endings = [], seen = {}, explicitMatch = false;
+  $('.sec-line article.postEp a[href*="/episode/"]').each(function (_, element) {
+    var anchor = wrap($, element);
+    var identity = (anchor.attr("title") || "") + " " + anchor.text();
+    var explicit = explicitSeasonEpisode(identity);
+    if (explicit && explicit.season === season && explicit.episode === episode) explicitMatch = true;
+    var number = episodeNumber(identity);
+    if (/نهايه الموسم/.test(normalize(identity)) && number > 0 && !seen[number]) {
+      endings.push(number); seen[number] = true;
+    }
+  });
+  if (explicitMatch) return { season: season, episode: episode };
+  endings.sort(function (a, b) { return a - b; });
+  var offset = 0, counts = metadata.seasons || [], complete = true;
+  for (var n = 1; n < season; n++) {
+    var count = 0;
+    for (var i = 0; i < counts.length; i++) {
+      if (counts[i].season_number === n) count = parseInt(counts[i].episode_count, 10) || 0;
+    }
+    if (!count) { complete = false; break; }
+    offset += count;
+  }
+  var boundary = endings[season - 2] || 0;
+  if (!complete) offset = boundary;
+  if (!offset || (boundary && boundary !== offset)) return null;
+  log("episode_mapping", "S" + season + "E" + episode + " -> " + (offset + episode));
+  return { season: 1, episode: offset + episode, mapped: true };
 }
 
 function findExactEpisode(series, wantedSeason, wantedEpisode) {
@@ -470,7 +562,7 @@ function findExactEpisode(series, wantedSeason, wantedEpisode) {
 }
 
 function anaPlayerAllowed(url) {
-  return /^https?:\/\/[^\/]*anaplayer\.online\//i.test(String(url || ""));
+  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:anaplayer\.online|shooof\.site)\/albaplayer\//i.test(String(url || ""));
 }
 
 function directMedia(url) {
@@ -614,44 +706,8 @@ function parseHlsMaster(text, masterUrl) {
   return variants;
 }
 
-/*
- * The CDN family used by AnaPlayer publishes its available rendition set in
- * the master URL itself, for example: video_,l,n,h,x,.urlset/master.m3u8.
- * Expanding this deterministic form avoids losing qualities when Nuvio can
- * play the media but its sandbox cannot read the master playlist response.
- */
-function variantsFromEncodedMaster(masterUrl) {
-  var value = String(masterUrl || "");
-  var match = value.match(/^(https?:\/\/[^?#]+\/)([^\/?#]+)_((?:,[a-z0-9]+)+),?\.urlset\/master\.m3u8(\?[^#]*)?$/i);
-  if (!match) return [];
-
-  var qualities = { l: "360p", n: "480p", h: "720p", x: "1080p" };
-  var codes = match[3].split(",");
-  var variants = [];
-  var seen = {};
-  for (var i = 0; i < codes.length; i++) {
-    var code = String(codes[i] || "").toLowerCase();
-    if (!qualities[code] || seen[code]) continue;
-    seen[code] = true;
-    variants.push({
-      url: match[1] + match[2] + "_" + code + "/index-v1-a1.m3u8" + (match[4] || ""),
-      quality: qualities[code]
-    });
-  }
-  return variants;
-}
-
-function isMasterPlaylistUrl(url) {
-  return /(?:master\.m3u8|\.urlset\/)/i.test(String(url || ""));
-}
-
 function isHlsPlaylistText(text) {
   return /^\s*#EXTM3U(?:\s|$)/i.test(String(text || "").replace(/^\uFEFF/, ""));
-}
-
-function reliableHlsSource(url, referer, serverName) {
-  var identity = String(url || "") + " " + String(referer || "") + " " + String(serverName || "");
-  return /cdnplus(?:\.space)?|dailymotion|dai\.ly|dmcdn/i.test(identity);
 }
 
 function unescapePackedString(value) {
@@ -721,7 +777,7 @@ function mediaEntriesFromHtml(html) {
 }
 
 function supportedDirectEmbed(url) {
-  return /^https?:\/\/[^\/]*(?:cdnplus\.space|mp4plus\.cyou|anafast\.cyou|vidoba\.cyou|vidspeed\.space|larhu\.website)\//i.test(String(url || ""));
+  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:cdnplus\.(?:space|sbs|org)|mp4plus\.cyou|anafast\.cyou|vidoba\.cyou|vidspeed\.space|larhu\.website)\//i.test(String(url || ""));
 }
 
 function dailymotionId(url) {
@@ -764,55 +820,33 @@ function collectAnaServers(html, playerUrl) {
 
 function addMediaEntry(entry, referer, serverName, streams, seenStreams) {
   var url = entry && entry.url ? entry.url : "";
-  if (!url || seenStreams[url]) return Promise.resolve();
-  var declaredQuality = entry.quality || qualityFromText(serverName) || qualityFromText(url);
-
+  if (!directMedia(url) || seenStreams[url]) return Promise.resolve();
+  // Claim before starting a request so parallel servers do not duplicate it.
+  seenStreams[url] = true;
+  var declaredQuality = entry.quality || qualityFromText(url);
+  function add(mediaUrl, quality) {
+    if (mediaUrl !== url && seenStreams[mediaUrl]) return;
+    seenStreams[mediaUrl] = true;
+    streams.push(streamObject(mediaUrl, referer, quality, serverName));
+  }
   if (!/\.m3u8(?:[?#]|$)/i.test(url)) {
-    if (!declaredQuality) return Promise.resolve();
-    seenStreams[url] = true;
-    streams.push(streamObject(url, referer, declaredQuality, serverName));
+    add(url, declaredQuality);
     return Promise.resolve();
   }
-
-  var encodedVariants = variantsFromEncodedMaster(url);
-  if (encodedVariants.length) {
-    seenStreams[url] = true;
-    if (!reliableHlsSource(url, referer, serverName)) return Promise.resolve();
-    for (var encodedIndex = 0; encodedIndex < encodedVariants.length; encodedIndex++) {
-      var encoded = encodedVariants[encodedIndex];
-      if (seenStreams[encoded.url]) continue;
-      seenStreams[encoded.url] = true;
-      streams.push(streamObject(encoded.url, referer, encoded.quality, serverName));
-    }
-    return Promise.resolve();
-  }
-
-  if (!reliableHlsSource(url, referer, serverName)) {
-    seenStreams[url] = true;
-    return Promise.resolve();
-  }
-
-  return fetchTextInfo(
-    url,
-    referer,
-    originOf(referer),
-    "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*"
-  ).then(function (result) {
-    var variants = parseHlsMaster(result.html, url);
-    if (!variants.length) {
-      if (declaredQuality && !isMasterPlaylistUrl(url) && isHlsPlaylistText(result.html) && !seenStreams[url]) {
-        seenStreams[url] = true;
-        streams.push(streamObject(url, referer, declaredQuality, serverName));
-      }
-      return;
-    }
-
-    for (var i = 0; i < variants.length; i++) {
-      if (!variants[i].quality || seenStreams[variants[i].url]) continue;
-      seenStreams[variants[i].url] = true;
-      streams.push(streamObject(variants[i].url, referer, variants[i].quality, serverName));
-    }
-  }).catch(function () {});
+  return fetchTextInfo(url, referer, originOf(referer),
+    "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*")
+    .then(function (result) {
+      if (!isHlsPlaylistText(result.html)) return;
+      var variants = parseHlsMaster(result.html, result.url);
+      // Keep an adaptive master intact when it carries alternate audio tracks.
+      if (/#EXT-X-MEDIA:.*TYPE=AUDIO/i.test(result.html)) { add(result.url, ""); return; }
+      if (!variants.length) { add(result.url, declaredQuality); return; }
+      for (var i = 0; i < variants.length; i++) add(variants[i].url, variants[i].quality);
+    }).catch(function () {
+      // A public player-declared URL may play even when playlist reads are blocked.
+      // Return the original adaptive URL; never manufacture renditions or quality.
+      add(url, declaredQuality);
+    });
 }
 
 function resolveDailymotion(url, referer, serverName, streams, seenStreams) {
@@ -857,7 +891,7 @@ function resolveEmbedTarget(target, expected, streams, seenStreams) {
   if (!supportedDirectEmbed(url)) return Promise.resolve();
 
   return fetchTextInfo(url, target.referer, originOf(target.referer)).then(function (result) {
-    var explicit = explicitSeasonEpisode(result.html + " " + result.url);
+    var explicit = explicitSeasonEpisode(result.url + " " + cheerio.load(result.html)("title").first().text());
     if (explicit && (explicit.season !== expected.season || explicit.episode !== expected.episode)) {
       logFailure("player_identity_mismatch", target.label);
       return;
@@ -876,7 +910,7 @@ function resolveAnaPlayer(playerUrl, episodeUrl, wantedSeason, wantedEpisode) {
   var seenStreams = {};
 
   return fetchTextInfo(playerUrl, episodeUrl, originOf(episodeUrl)).then(function (player) {
-    var explicit = explicitSeasonEpisode(player.url + " " + player.html);
+    var explicit = explicitSeasonEpisode(player.url + " " + cheerio.load(player.html)("title").first().text());
     if (explicit && (explicit.season !== wantedSeason || explicit.episode !== wantedEpisode)) {
       logFailure("player_identity_mismatch", "AnaPlayer");
       return [];
@@ -988,54 +1022,43 @@ function getStreams(tmdbId, mediaType, season, episode) {
   log("tmdb_id", id);
   log("request", "S" + wantedSeason + "E" + wantedEpisode);
 
-  var context = { metadata: null, series: null, episodeCandidate: null, verifiedEpisode: null };
-
-  return getTmdbMetadata(id)
-    .then(function (metadata) {
-      context.metadata = metadata;
-      log("titles", metadata.titles.join(" | "));
-      if (!metadata.titles.length) {
-        logFailure("tmdb_metadata_not_found");
-        return null;
-      }
-      return resolveSeries(metadata);
-    })
-    .then(function (series) {
-      if (!series) {
-        logFailure("series_not_found");
-        return null;
-      }
-      context.series = series;
-      log("matched_series", series.url);
-      context.episodeCandidate = findExactEpisode(series, wantedSeason, wantedEpisode);
-      if (!context.episodeCandidate) {
-        logFailure("episode_not_found", "S" + wantedSeason + "E" + wantedEpisode);
-        return null;
-      }
-      return verifyEpisodePage(series, context.episodeCandidate, wantedSeason, wantedEpisode);
-    })
-    .then(function (verifiedEpisode) {
-      if (!verifiedEpisode) return [];
-      context.verifiedEpisode = verifiedEpisode;
-      log("episode_url", verifiedEpisode.episodeUrl);
-      log("player_url", verifiedEpisode.playerUrl);
-      return resolvePlayer(verifiedEpisode);
-    })
-    .then(function (streams) {
-      var sorted = sortStreams(streams || []);
-      if (!sorted.length) logFailure("no_media_sources");
-      for (var i = 0; i < sorted.length; i++) {
-        log("quality", sorted[i].quality || "unannounced");
-      }
-      log("streams_found", sorted.length);
-      return sorted;
-    })
-    .catch(function (error) {
-      var message = errorMessage(error);
-      if (message.indexOf("cloudflare_challenge") === 0) logFailure("cloudflare_challenge");
-      else logFailure("fatal", message);
-      return [];
-    });
+  return getTmdbMetadata(id).then(function (metadata) {
+    log("titles", metadata.titles.join(" | "));
+    if (!metadata.titles.length) { logFailure("tmdb_metadata_not_found"); return []; }
+    var sourceIndex = 0;
+    function nextSource() {
+      if (sourceIndex >= SOURCES.length) return Promise.resolve([]);
+      var source = SOURCES[sourceIndex++];
+      log("source", source.name);
+      return resolveSeries(metadata, source).then(function (series) {
+        if (!series) return [];
+        log("matched_series", series.url);
+        var request = siteEpisodeRequest(series, metadata, wantedSeason, wantedEpisode);
+        if (!request) { logFailure("season_mapping_unavailable"); return []; }
+        var candidate = findExactEpisode(series, request.season, request.episode);
+        if (!candidate) { logFailure("episode_not_found", "S" + wantedSeason + "E" + wantedEpisode); return []; }
+        return verifyEpisodePage(series, candidate, request.season, request.episode).then(function (verified) {
+          if (!verified) return [];
+          return resolvePlayer(verified);
+        });
+      }).catch(function (error) {
+        logFailure("source_failed", source.name + " " + errorMessage(error).replace(/api_key=[^&\s]+/gi, "api_key=REDACTED"));
+        return [];
+      }).then(function (streams) {
+        if (!streams.length) return nextSource();
+        for (var i = 0; i < streams.length; i++) {
+          streams[i].name = source.name;
+          streams[i].provider = source.name;
+          streams[i].title = streams[i].title.replace(/^Krmizi/, source.name);
+        }
+        return sortStreams(streams);
+      });
+    }
+    return nextSource();
+  }).then(function (streams) {
+    log("streams_found", streams.length);
+    return streams;
+  }).catch(function () { logFailure("metadata_failed"); return []; });
 }
 
 module.exports = { getStreams: getStreams };
