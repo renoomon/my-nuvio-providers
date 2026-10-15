@@ -1,12 +1,12 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.9.0
+ * Version: 0.10.0
  *
  * Accuracy-first flow:
- * TMDB localized + alternative titles -> ordered source search -> verified
+ * TMDB localized + alternative titles -> parallel source searches -> verified
  * series page -> exact episode inside that page -> page-owned player ->
  * AlbaPlayer servers for that episode only -> public HLS/MP4 sources.
- * Krmizi -> ShoofLive -> Qisat; advance only when the source returns no streams.
+ * Search Krmizi, ShoofLive and Qisat independently; combine every source result.
  *
  * The provider never crawls related posts or arbitrary page links. It uses
  * Promise chains and the modules exposed by Nuvio's QuickJS/Hermes runtime.
@@ -16,7 +16,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.9.0";
+var VERSION = "0.10.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
   { name: "Krmizi", bases: ["https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
@@ -1025,12 +1025,12 @@ function getStreams(tmdbId, mediaType, season, episode) {
   return getTmdbMetadata(id).then(function (metadata) {
     log("titles", metadata.titles.join(" | "));
     if (!metadata.titles.length) { logFailure("tmdb_metadata_not_found"); return []; }
-    var sourceIndex = 0;
-    function nextSource() {
-      if (sourceIndex >= SOURCES.length) return Promise.resolve([]);
-      var source = SOURCES[sourceIndex++];
+    var jobs = SOURCES.map(function (source) {
       log("source", source.name);
-      return resolveSeries(metadata, source).then(function (series) {
+      // Keep each source's failure inside its own job so other results survive.
+      return Promise.resolve().then(function () {
+        return resolveSeries(metadata, source);
+      }).then(function (series) {
         if (!series) return [];
         log("matched_series", series.url);
         var request = siteEpisodeRequest(series, metadata, wantedSeason, wantedEpisode);
@@ -1045,16 +1045,20 @@ function getStreams(tmdbId, mediaType, season, episode) {
         logFailure("source_failed", source.name + " " + errorMessage(error).replace(/api_key=[^&\s]+/gi, "api_key=REDACTED"));
         return [];
       }).then(function (streams) {
-        if (!streams.length) return nextSource();
+        log("source_streams", source.name + " " + streams.length);
         for (var i = 0; i < streams.length; i++) {
           streams[i].name = source.name;
           streams[i].provider = source.name;
           streams[i].title = streams[i].title.replace(/^Krmizi/, source.name);
         }
-        return sortStreams(streams);
+        return streams;
       });
-    }
-    return nextSource();
+    });
+    return Promise.all(jobs).then(function (results) {
+      var combined = [];
+      for (var i = 0; i < results.length; i++) combined = combined.concat(results[i]);
+      return sortStreams(combined);
+    });
   }).then(function (streams) {
     log("streams_found", streams.length);
     return streams;

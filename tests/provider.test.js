@@ -66,7 +66,7 @@ function network({ primary = false, emptyPrimary = false, third = false } = {}) 
   };
 }
 
-test('S2E1 and S2E2 map to 17 and 18 and fall back to ShoofLive', async () => {
+test('S2E1 and S2E2 map to 17 and 18 while all sources are searched', async () => {
   for (const episode of [1,2]) {
     const {ctx,calls} = runtime(network(), { TMDB_API_KEY: 'test-key' });
     const streams = await ctx.module.exports.getStreams('123', 'tv', 2, episode);
@@ -75,17 +75,18 @@ test('S2E1 and S2E2 map to 17 and 18 and fall back to ShoofLive', async () => {
     assert.equal(streams[0].provider, 'ShoofLive');
     assert(calls.includes(episodeUrl(16 + episode)));
     assert(!calls.includes(episodeUrl(episode)));
-    assert(!calls.some(u => u.includes('qisat')));
+    assert(calls.some(u => u.includes('qisat')));
     assert(calls.filter(u => u.includes('api.themoviedb.org')).length === 3);
   }
 });
-test('a working primary source stops the fallback chain', async () => {
+test('a working primary source does not stop the other searches', async () => {
   const {ctx,calls} = runtime(network({primary:true}), { TMDB_API_KEY: 'test-key' });
   const streams = await ctx.module.exports.getStreams('123','tv',2,1);
   assert.equal(streams[0].provider, 'Krmizi');
-  assert(!calls.some(u => u.startsWith(base)));
+  assert(calls.some(u => u.startsWith(base)));
+  assert(calls.some(u => u.startsWith('https://www.qisat.tv')));
 });
-test('matched primary with no media continues to ShoofLive', async () => {
+test('primary with no media does not remove ShoofLive results', async () => {
   const primary = network({emptyPrimary:true}), backup = network();
   const {ctx,calls} = runtime((url, opts) => {
     if (url.startsWith('https://www.qrmzi.tv/episode/')) return response('<h1>unavailable</h1>',url);
@@ -95,10 +96,50 @@ test('matched primary with no media continues to ShoofLive', async () => {
   assert.equal(streams[0].provider, 'ShoofLive');
   assert(calls.some(u => u.startsWith(base)));
 });
-test('Qisat is tried after both earlier sources fail', async () => {
+test('Qisat results survive when the other sources fail', async () => {
   const {ctx} = runtime(network({third:true}), {TMDB_API_KEY:'test-key'});
   const streams = await ctx.module.exports.getStreams('123','tv',2,2);
   assert.equal(streams[0].provider,'Qisat');
+});
+test('combines results from all three successful sources and keeps their names', async () => {
+  const primary=network({primary:true}), backup=network(), third=network({third:true});
+  const {ctx,calls}=runtime((url, opts) => {
+    if (url.startsWith('https://www.qrmzi.tv')) return primary(url,opts);
+    if (url.startsWith('https://www.qisat.tv')) return third(url,opts);
+    return backup(url,opts);
+  }, {TMDB_API_KEY:'test-key'});
+  const streams=await ctx.module.exports.getStreams('123','tv',2,1);
+  assert.equal(streams.length,6);
+  assert.deepEqual([...new Set(streams.map(s=>s.provider))].sort(), ['Krmizi','Qisat','ShoofLive']);
+  for (const name of ['Krmizi','ShoofLive','Qisat']) {
+    const owned=streams.filter(s=>s.provider===name);
+    assert.equal(owned.length,2);
+    assert(owned.every(s=>s.name===name && s.title.startsWith(name)));
+  }
+  assert.deepEqual(Array.from(streams,s=>s.quality),['1080p','1080p','1080p','360p','360p','360p']);
+  assert.equal(calls.filter(u=>u.includes('api.themoviedb.org')).length,3);
+});
+test('a rejected source cannot discard successful results from the other two', async () => {
+  const backup=network(), third=network({third:true});
+  const {ctx}=runtime((url,opts)=>url.startsWith('https://www.qisat.tv')?third(url,opts):backup(url,opts),{TMDB_API_KEY:'test-key'});
+  const resolve=ctx.resolveSeries;
+  ctx.resolveSeries=(metadata,source)=>source.name==='Krmizi'?Promise.reject(Error('source unavailable')):resolve(metadata,source);
+  const streams=await ctx.module.exports.getStreams('123','tv',2,2);
+  assert.equal(streams.length,4);
+  assert.deepEqual([...new Set(streams.map(s=>s.provider))].sort(),['Qisat','ShoofLive']);
+});
+test('all sources are started before a pending source completes', async () => {
+  const {ctx}=runtime(network(),{TMDB_API_KEY:'test-key'});
+  const started=[];
+  let release;
+  const pending=new Promise(resolve=>{release=resolve;});
+  ctx.resolveSeries=(_,source)=>{started.push(source.name);return source.name==='Krmizi'?pending:Promise.resolve(null);};
+  const result=ctx.module.exports.getStreams('123','tv',2,1);
+  // Drain microtasks for metadata and source jobs without introducing timers.
+  for(let i=0;i<40;i++) await Promise.resolve();
+  assert.deepEqual(started,['Krmizi','ShoofLive','Qisat']);
+  release(null);
+  assert.equal((await result).length,0);
 });
 test('follows pagination and verifies the result on page two', async () => {
   const root='https://www.qrmzi.tv', index=root+'/all-turkish-series/';
