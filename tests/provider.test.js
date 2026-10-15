@@ -28,8 +28,9 @@ function runtime(fetch, globals = {}) {
   vm.runInNewContext(code, ctx);
   return { ctx, calls, logs };
 }
-const response = (body, url, status = 200) => ({ ok: status >= 200 && status < 300,
-  status, url, text: () => Promise.resolve(typeof body === 'string' ? body : JSON.stringify(body)) });
+const response = (body, url, status = 200, contentType = '') => ({ ok: status >= 200 && status < 300,
+  status, url, headers: { get: name => name.toLowerCase()==='content-type' ? contentType : null },
+  text: () => Promise.resolve(typeof body === 'string' ? body : JSON.stringify(body)) });
 const base = 'https://s5.shooflive.cyou';
 const seriesUrl = base + '/series/yeralti/';
 const episodeUrl = n => base + '/episode/yeralti-' + n + '/';
@@ -37,6 +38,11 @@ const playerUrl = n => 'https://shooof.site/albaplayer/yeralti-2026-s01e' + n;
 const cdnUrl = 'https://cdnplus.sbs/embed-test.html';
 const master = 'https://media.example.test/hls/master.m3u8?token=example';
 const playlist = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360\n360/index.m3u8?token=example\n#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1920x1080\n1080/index.m3u8?token=example\n';
+const mediaPlaylist = '#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nsegment-1.ts\n#EXT-X-ENDLIST\n';
+function mediaResponse(url, opts) {
+  if (url.endsWith('.ts') || opts && opts.method==='HEAD') return response('',url,206,'video/MP2T');
+  return response(mediaPlaylist,url,200,'application/vnd.apple.mpegurl');
+}
 function card(n, finale = false) {
   return `<article class="postEp"><a href="${episodeUrl(n)}" title="مسلسل تحت الارض الحلقة ${n}">${finale ? '<b>نهاية الموسم</b>' : ''}<span class="episodeNum">حلقة ${n}</span><div class="title">مسلسل تحت الارض الحلقة ${n}</div></a></article>`;
 }
@@ -62,6 +68,7 @@ function network({ primary = false, emptyPrimary = false, third = false } = {}) 
     if (url.startsWith('https://shooof.site/')) return response(emptyPrimary ? '<title>no servers</title>' : playerHtml(+(url.match(/s01e(\d+)/) || [])[1]), url);
     if (url === cdnUrl) return response(`sources:[{file:"${master}"}]`, url);
     if (url === master) { assert.equal(opts.headers.Referer, cdnUrl); return response(playlist, url); }
+    if (url.startsWith('https://media.example.test/')) return mediaResponse(url,opts);
     return response('unavailable', url, 503);
   };
 }
@@ -114,7 +121,7 @@ test('combines results from all three successful sources and keeps their names',
   for (const name of ['Krmizi','ShoofLive','Qisat']) {
     const owned=streams.filter(s=>s.provider===name);
     assert.equal(owned.length,2);
-    assert(owned.every(s=>s.name===name && s.title.startsWith(name)));
+    assert(owned.every(s=>s.name.startsWith(name + " • ") && s.title.startsWith(name)));
   }
   assert.deepEqual(Array.from(streams,s=>s.quality),['1080p','1080p','1080p','360p','360p','360p']);
   assert.equal(calls.filter(u=>u.includes('api.themoviedb.org')).length,3);
@@ -168,7 +175,7 @@ test('wrong episode, wrong series and wrong player episode are rejected', async 
   }
 });
 test('unknown MP4 quality does not remove a real source or invent a label', async () => {
-  const {ctx}=runtime(()=>{throw Error('unused')});const streams=[];
+  const {ctx}=runtime(url=>response('',url,200,'video/mp4'));const streams=[];
   await ctx.addMediaEntry({url:'https://media.test/file.mp4'},'', 'Full HD',streams,{});
   assert.equal(streams.length,1); assert.equal(streams[0].quality,undefined);
 });
@@ -178,24 +185,24 @@ test('accepts current CDNPlus and Shoof AlbaPlayer hosts with exact host boundar
   assert(!ctx.supportedDirectEmbed('https://fakecdnplus.sbs/embed-x.html'));
   assert(!ctx.anaPlayerAllowed('https://fakeanaplayer.online/albaplayer/x'));
 });
-test('HLS failures retain original master, without fabricated quality URLs', async () => {
+test('unreadable HLS masters are not returned as playable streams', async () => {
   const {ctx}=runtime(()=>{throw Error('blocked')});const streams=[];
   const url='https://cdn.test/video_,l,n,h,x,.urlset/master.m3u8?signature=abc';
   await ctx.addMediaEntry({url},cdnUrl,'CDNPlus',streams,{});
-  assert.equal(streams.length,1);assert.equal(streams[0].url,url);assert.equal(streams[0].quality,undefined);
+  assert.equal(streams.length,0);
 });
 test('valid HLS on other supported servers is parsed; HTML is rejected', async () => {
   for(const body of [playlist,'<html>not a playlist</html>']){
-    const {ctx}=runtime(url=>response(body,url));const streams=[];
+    const {ctx}=runtime((url,opts)=>url===master?response(body,url):mediaResponse(url,opts));const streams=[];
     await ctx.addMediaEntry({url:master},'https://vidspeed.space/embed-x','VidSpeed',streams,{});
     assert.equal(streams.length,body===playlist?2:0);
   }
 });
 test('HLS uses redirected base URLs, preserves audio, and deduplicates parallel entries', async () => {
-  const {ctx}=runtime(()=>response(playlist,'https://redirect.test/path/master.m3u8'));const streams=[],seen={};
+  const {ctx}=runtime((url,opts)=>url===master?response(playlist,'https://redirect.test/path/master.m3u8'):mediaResponse(url,opts));const streams=[],seen={};
   await Promise.all([ctx.addMediaEntry({url:master},cdnUrl,'A',streams,seen),ctx.addMediaEntry({url:master},cdnUrl,'B',streams,seen)]);
   assert.equal(streams.length,2);assert(streams[0].url.startsWith('https://redirect.test/path/360/'));
-  const audio=runtime(url=>response('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",URI="audio.m3u8"\n'+playlist,url));const withAudio=[];
+  const audio=runtime((url,opts)=>url===master?response('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",URI="audio.m3u8"\n'+playlist,url):mediaResponse(url,opts));const withAudio=[];
   await audio.ctx.addMediaEntry({url:master},cdnUrl,'A',withAudio,{});assert.equal(withAudio.length,1);assert.equal(withAudio[0].url,master);
 });
 test('packer decoding extracts sources without executing page JavaScript', () => {
@@ -226,4 +233,67 @@ test('captured ShoofLive HTML resolves the actual episode 18 and current player'
   assert.equal(verified.playerUrl,'https://shooof.site/albaplayer/yeralti-2026-s01e18');
   assert.equal(ctx.collectAnaServers(fixture('player'),verified.playerUrl).length,7);
   assert.equal(ctx.primaryServerEmbed(fixture('player'),verified.playerUrl),'https://cdnplus.sbs/embed-cchfgontu0in.html');
+});
+
+
+test('a successful master with forbidden child playlists produces no results', async () => {
+  const {ctx}=runtime(url=>url===master?response(playlist,url):response('Forbidden',url,403,'text/html'));
+  const streams=[];await ctx.addMediaEntry({url:master},cdnUrl,'AnaFast',streams,{});
+  assert.equal(streams.length,0);
+});
+test('a readable child playlist with a blocked video segment is rejected', async () => {
+  const {ctx}=runtime(url=>url===master?response(playlist,url):url.endsWith('.ts')?response('Forbidden',url,403,'text/html'):response(mediaPlaylist,url));
+  const streams=[];await ctx.addMediaEntry({url:master},cdnUrl,'AnaFast',streams,{});
+  assert.equal(streams.length,0);
+});
+test('only working renditions survive, and the segment probe receives playback headers', async () => {
+  const {ctx,calls}=runtime((url,opts)=>{
+    if(url===master)return response(playlist,url);
+    if(url.includes('/360/'))return response('Forbidden',url,403,'text/html');
+    if(url.endsWith('.ts')) {
+      assert.equal(opts.headers.Referer,cdnUrl);assert.equal(opts.headers.Origin,'https://cdnplus.sbs');
+      assert.equal(opts.headers.Range,'bytes=0-511');return response('',url,206,'video/MP2T');
+    }
+    return response(mediaPlaylist,url);
+  });
+  const streams=[];await ctx.addMediaEntry({url:master},cdnUrl,'CDNPlus',streams,{});
+  assert.equal(streams.length,1);assert.equal(streams[0].quality,'1080p');
+  assert(calls.some(url=>url.endsWith('.ts')));
+});
+test('MP4 probes use HEAD and reject HTML error responses even with HTTP 200', async () => {
+  const {ctx}=runtime((url,opts)=>{assert.equal(opts.method,'HEAD');return response('',url,200,'text/html');});
+  const streams=[];await ctx.addMediaEntry({url:'https://media.test/expired.mp4'},cdnUrl,'MP4Plus',streams,{});
+  assert.equal(streams.length,0);
+});
+test('fragmented HLS requires its initialization segment to be accessible', async () => {
+  const {ctx}=runtime((url,opts)=>{
+    if(url===master)return response('#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:10,\nsegment-1.ts\n',url);
+    if(url.endsWith('init.mp4'))return response('Forbidden',url,403);
+    return mediaResponse(url,opts);
+  });
+  const streams=[];await ctx.addMediaEntry({url:master},cdnUrl,'Vids',streams,{});assert.equal(streams.length,0);
+});
+test('Vids host linked by the Shoof player is supported with strict hostname boundaries',()=>{
+  const {ctx}=runtime(()=>{});assert(ctx.supportedDirectEmbed('https://morencius.com/embed/example'));
+  assert(!ctx.supportedDirectEmbed('https://fakemorencius.com/embed/example'));
+});
+
+
+test('playback preserves the extraction language header required by AnaFast', () => {
+  const {ctx}=runtime(()=>{});
+  const stream=ctx.streamObject(master,'https://anafast.cyou/embed-example.html','720p','AnaFast');
+  const extraction=ctx.requestHeaders('https://anafast.cyou/embed-example.html','https://anafast.cyou','*/*');
+  assert.deepEqual(JSON.parse(JSON.stringify(stream.headers)),JSON.parse(JSON.stringify(extraction)));
+  assert.equal(stream.headers['Accept-Language'],'ar,en-US;q=0.8,en;q=0.7,tr;q=0.6');
+});
+test('media probes and returned playback headers have the same request profile', async () => {
+  let captured;
+  const {ctx}=runtime((url,opts)=>{
+    if(url===master)return response(mediaPlaylist,url);
+    captured={...opts.headers};delete captured.Range;
+    return response('',url,206,'video/MP2T');
+  });
+  const streams=[];await ctx.addMediaEntry({url:master},cdnUrl,'CDNPlus',streams,{});
+  assert.equal(streams.length,1);
+  assert.deepEqual(captured,JSON.parse(JSON.stringify(streams[0].headers)));
 });

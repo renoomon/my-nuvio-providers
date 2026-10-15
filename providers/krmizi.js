@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.10.0
+ * Version: 0.10.1
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
@@ -16,7 +16,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.10.0";
+var VERSION = "0.10.1";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
   { name: "Krmizi", bases: ["https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
@@ -477,7 +477,10 @@ function resolveSeries(metadata, source) {
       var url = base + "/?s=" + encodeURIComponent(queries[queryIndex++]);
       return fetchTextInfo(url, base + "/", "").then(function (result) {
         return verifyRankedCards(parseSeriesCards(result.html, result.url, metadata.titles), metadata.titles, result.url);
-      }).then(function (series) { return series || search(); }).catch(function () { return nextBase(); });
+      }).then(function (series) { return series || search(); }).catch(function () {
+        logFailure("source_request_failed", source.name + " " + originOf(base));
+        return nextBase();
+      });
     }
     function index(url, count) {
       if (!url || count >= MAX_INDEX_PAGES) return Promise.resolve(null);
@@ -663,18 +666,19 @@ function mediaTypeFromUrl(url) {
   return "";
 }
 
+function playbackHeaders(referer) {
+  // These CDNs also check Accept-Language. Forward the same request profile
+  // used during extraction instead of dropping it when handing off to Nuvio.
+  return requestHeaders(referer, originOf(referer), "*/*");
+}
+
 function streamObject(url, referer, quality, serverName) {
   var resolvedQuality = quality || qualityFromText(url);
   var label = String(serverName || "Server").replace(/\s+/g, " ").trim();
-  var headers = { "User-Agent": UA };
-  if (referer) {
-    headers.Referer = referer;
-    var origin = originOf(referer);
-    if (origin) headers.Origin = origin;
-  }
+  var headers = playbackHeaders(referer);
 
   var stream = {
-    name: "Krmizi",
+    name: "Krmizi • " + label,
     title: "Krmizi • " + label + (resolvedQuality ? " • " + resolvedQuality : ""),
     url: url,
     provider: "Krmizi",
@@ -777,7 +781,7 @@ function mediaEntriesFromHtml(html) {
 }
 
 function supportedDirectEmbed(url) {
-  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:cdnplus\.(?:space|sbs|org)|mp4plus\.cyou|anafast\.cyou|vidoba\.cyou|vidspeed\.space|larhu\.website)\//i.test(String(url || ""));
+  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:cdnplus\.(?:space|sbs|org)|mp4plus\.cyou|anafast\.cyou|vidoba\.cyou|vidspeed\.space|larhu\.website|morencius\.com)\//i.test(String(url || ""));
 }
 
 function dailymotionId(url) {
@@ -818,10 +822,71 @@ function collectAnaServers(html, playerUrl) {
   return servers.slice(0, MAX_SERVERS);
 }
 
+function responseHeader(response, name) {
+  return response && response.headers && typeof response.headers.get === "function" ?
+    String(response.headers.get(name) || "") : "";
+}
+
+/* A master playlist alone is not a playback check. Probe the media endpoint
+ * with the same headers the player receives. Never download a whole MP4 here.
+ */
+function probeMediaFile(url, referer, isMp4) {
+  var headers = playbackHeaders(referer);
+  if (!isMp4) headers.Range = "bytes=0-511";
+  return fetch(url, { method: isMp4 ? "HEAD" : "GET", headers: headers, skipSizeCheck: true })
+    .then(function (response) {
+      if (!response || !response.ok) return false;
+      var type = responseHeader(response, "content-type").toLowerCase();
+      if (/text\/|html|json|xml/.test(type)) return false;
+      var length = responseHeader(response, "content-length");
+      if (length && parseInt(length, 10) === 0) return false;
+      if (/^(?:video|audio)\//.test(type) || /application\/(?:octet-stream|mp2t|mp4)/.test(type)) return true;
+      // Old runtimes may omit response headers. A bounded HLS segment can
+      // still be checked by its MPEG-TS/fMP4 signature when bytes are exposed.
+      if (!isMp4 && typeof response.arrayBuffer === "function") {
+        return response.arrayBuffer().then(function (buffer) {
+          var bytes = new Uint8Array(buffer);
+          return bytes.length > 8 && (bytes[0] === 0x47 ||
+            (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) ||
+            (bytes[4] === 0x73 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70));
+        });
+      }
+      return false;
+    }).catch(function () { return false; });
+}
+
+function validateMediaPlaylist(result, referer) {
+  if (!isHlsPlaylistText(result.html) || !/#EXTINF:/i.test(result.html)) return Promise.resolve(false);
+  var lines = result.html.replace(/\r/g, "").split("\n");
+  var segment = "", init = "";
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (line.indexOf("#EXT-X-MAP:") === 0) {
+      var match = line.match(/URI="([^"]+)"/i);
+      if (match) init = absUrl(match[1], result.url);
+    }
+    if (!segment && line && line.charAt(0) !== "#") segment = absUrl(line, result.url);
+  }
+  if (!segment) return Promise.resolve(false);
+  var jobs = [probeMediaFile(segment, referer, false)];
+  if (init) jobs.push(probeMediaFile(init, referer, false));
+  return Promise.all(jobs).then(function (valid) {
+    for (var j = 0; j < valid.length; j++) if (!valid[j]) return false;
+    return true;
+  });
+}
+
+function readMediaPlaylist(url, referer) {
+  return fetchTextInfo(url, referer, originOf(referer),
+    "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*")
+    .then(function (result) {
+      return validateMediaPlaylist(result, referer).then(function (valid) { return valid ? result : null; });
+    }).catch(function () { return null; });
+}
+
 function addMediaEntry(entry, referer, serverName, streams, seenStreams) {
   var url = entry && entry.url ? entry.url : "";
   if (!directMedia(url) || seenStreams[url]) return Promise.resolve();
-  // Claim before starting a request so parallel servers do not duplicate it.
   seenStreams[url] = true;
   var declaredQuality = entry.quality || qualityFromText(url);
   function add(mediaUrl, quality) {
@@ -830,23 +895,34 @@ function addMediaEntry(entry, referer, serverName, streams, seenStreams) {
     streams.push(streamObject(mediaUrl, referer, quality, serverName));
   }
   if (!/\.m3u8(?:[?#]|$)/i.test(url)) {
-    add(url, declaredQuality);
-    return Promise.resolve();
+    return probeMediaFile(url, referer, true).then(function (valid) { if (valid) add(url, declaredQuality); });
   }
   return fetchTextInfo(url, referer, originOf(referer),
     "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*")
     .then(function (result) {
       if (!isHlsPlaylistText(result.html)) return;
       var variants = parseHlsMaster(result.html, result.url);
-      // Keep an adaptive master intact when it carries alternate audio tracks.
-      if (/#EXT-X-MEDIA:.*TYPE=AUDIO/i.test(result.html)) { add(result.url, ""); return; }
-      if (!variants.length) { add(result.url, declaredQuality); return; }
-      for (var i = 0; i < variants.length; i++) add(variants[i].url, variants[i].quality);
-    }).catch(function () {
-      // A public player-declared URL may play even when playlist reads are blocked.
-      // Return the original adaptive URL; never manufacture renditions or quality.
-      add(url, declaredQuality);
-    });
+      if (!variants.length) {
+        return validateMediaPlaylist(result, referer).then(function (valid) { if (valid) add(result.url, declaredQuality); });
+      }
+      var jobs = variants.map(function (variant) {
+        return readMediaPlaylist(variant.url, referer).then(function (media) {
+          return media ? { url: media.url, quality: variant.quality } : null;
+        });
+      });
+      return Promise.all(jobs).then(function (verified) {
+        // Keep alternate audio attached. Only return its master if every
+        // advertised rendition and the audio playlist passed their probes.
+        var audio = result.html.match(/#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*URI="([^"]+)"/i);
+        if (audio) {
+          for (var a = 0; a < verified.length; a++) if (!verified[a]) return;
+          return readMediaPlaylist(absUrl(audio[1], result.url), referer).then(function (media) {
+            if (media) add(result.url, "");
+          });
+        }
+        for (var i = 0; i < verified.length; i++) if (verified[i]) add(verified[i].url, verified[i].quality);
+      });
+    }).catch(function () { logFailure("media_unavailable", originOf(url)); });
 }
 
 function resolveDailymotion(url, referer, serverName, streams, seenStreams) {
@@ -1047,7 +1123,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       }).then(function (streams) {
         log("source_streams", source.name + " " + streams.length);
         for (var i = 0; i < streams.length; i++) {
-          streams[i].name = source.name;
+          streams[i].name = streams[i].name.replace(/^Krmizi/, source.name);
           streams[i].provider = source.name;
           streams[i].title = streams[i].title.replace(/^Krmizi/, source.name);
         }
