@@ -1,14 +1,14 @@
 {
   "name": "My Nuvio Providers",
-  "version": "1.8.0",
-  "description": "Parallel Turkish series sources with dual episode numbering and bounded requests",
+  "version": "1.9.0",
+  "description": "Parallel Turkish series catalog and archive search",
   "author": "renoomon",
   "scrapers": [
     {
       "id": "krmizi",
       "name": "Turkish Sources | مسلسلات تركية",
-      "description": "All-source search, season and absolute episode numbers, validated playback",
-      "version": "0.11.0",
+      "description": "Search current and archived series with Arabic and Turkish titles",
+      "version": "0.12.0",
       "filename": "providers/krmizi.js",
       "supportedTypes": [
         "tv"

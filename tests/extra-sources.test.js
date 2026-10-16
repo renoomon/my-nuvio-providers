@@ -49,3 +49,52 @@ test('NOW uses only full episode links with confirmed flat numbering',()=>{
  assert.equal(c.nowOwnedLinks(html,'https://www.nowtv.com.tr/',metadata,[{season:1,episode:18}]).episodes.length,1);
  assert.equal(c.nowOwnedLinks(html,'https://www.nowtv.com.tr/',metadata,[{season:2,episode:1}]).episodes.length,0);
 });
+
+test('archive searches use each source actual form and preserve Arabic/Turkish aliases',()=>{
+ const c=setup(),meta={titles:['Collision','Çarpışma','اصطدام']};
+ const dd=c.extraSearchRequests(meta,{search:'ddizi'},'https://www.ddizi.tel',[{season:1,episode:1}]);
+ assert(dd.every(r=>r.url==='https://www.ddizi.tel/arama/'&&r.method==='POST'&&r.body.startsWith('arama=')));
+ assert(dd.some(r=>decodeURIComponent(r.body).includes('Çarpışma')));assert(dd.some(r=>decodeURIComponent(r.body).includes('اصطدام')));
+ const tv=c.extraSearchRequests(meta,{search:'tvajax'},'https://tvdiziler.tv',[{season:1,episode:1}]);
+ assert(tv.every(r=>r.url.includes('/search?qr=')&&r.method==='POST'&&r.jsonHtml));
+ const sh=c.extraSearchRequests(meta,{search:'php'},'https://sh4u.buzz',[{season:1,episode:1}]);
+ assert(sh.some(r=>decodeURIComponent(r.url).includes('اصطدام الحلقة 1')));
+});
+test('AJAX catalog search extracts HTML from successful JSON only',async()=>{
+ const c=setup();let options;
+ c.fetch=async(url,opts)=>{options=opts;return{ok:true,status:200,url,text:async()=>JSON.stringify({success:true,data:'<a href="dizi/carpisma">Çarpışma</a>'})};};
+ const page=await c.extraFetchCatalog({url:'https://tvdiziler.tv/search?qr=carpisma',method:'POST',body:'',jsonHtml:true},'https://tvdiziler.tv/');
+ assert(page.html.includes('Çarpışma'));assert.equal(options.method,'POST');assert.equal(options.headers['X-Requested-With'],'XMLHttpRequest');
+});
+test('DDizi follows owned zero-based archive pagination and can jump to oldest episodes',()=>{
+ const c=setup(),url='https://www.ddizi.tel/diziler/1716/carpisma';
+ const html='<a href="/izle/24" title="Çarpışma 24.Bölüm">24</a><a href="/izle/15" title="Çarpışma 15.Bölüm">15</a><ul class="pagination"><li><a href="'+url+'/sayfa-0">1</a></li><li><a href="'+url+'/sayfa-1">2</a></li><li><a href="'+url+'/sayfa-2">3</a></li></ul>';
+ assert.equal(c.extraNextCatalogPage(html,url),url+'/sayfa-1');assert.equal(c.extraLastCatalogPage(html,url,[{season:1,episode:1}]),url+'/sayfa-2');
+});
+test('strict owned heading rejects العهد inside ولي العهد even when a secondary title claims otherwise',()=>{
+ const c=setup();assert.equal(c.extraPageTitleMatches('<h1>مسلسل ولي العهد الحلقة 1</h1><title>مسلسل العهد الحلقة 1</title>',{titles:['العهد','Söz']}),false);
+ assert.equal(c.extraPageTitleMatches('<h1>مسلسل العهد الحلقة 1</h1>',{titles:['العهد','Söz']}),true);
+});
+test('NOW archive navigation follows only archive URLs exposed by its own catalog',()=>{
+ const c=setup(),links=c.nowArchiveLinks('<a href="/dizi-arsivi">DİZİ ARŞİVİ</a><a href="/dizi-izle">Diziler</a><a href="https://ad.test/arsiv">Archive</a>','https://www.nowtv.com.tr/');
+ assert.equal(links.length,2);assert(links.every(u=>u.startsWith('https://www.nowtv.com.tr/')));
+});
+test('DDizi archive discovery reaches episode one through POST search and owned last page',async()=>{
+ const c=setup(),calls=[],base='https://www.ddizi.tel';
+ c.fetch=async(url,opts)=>{
+  calls.push([url,opts]);let html='';
+  if(url===base+'/')html='<h1>Latest episodes</h1>';
+  else if(url===base+'/arama/')html=(opts.body.includes(encodeURIComponent('Çarpışma'))?'<a href="/diziler/1716/carpisma" title="Çarpışma izle">Çarpışma</a>':'');
+  else if(url===base+'/diziler/1716/carpisma')html='<a href="/izle/24" title="Çarpışma 24.Bölüm">24</a><ul class="pagination"><li><a href="/diziler/1716/carpisma/sayfa-2">3</a></li></ul>';
+  else if(url===base+'/diziler/1716/carpisma/sayfa-2')html='<a href="/izle/1" title="Çarpışma 1.Bölüm">1</a>';
+  else if(url===base+'/izle/1')html='<h1>Çarpışma 1.Bölüm izle</h1><iframe src="/player/1"></iframe>';
+  else if(url===base+'/player/1')html='<meta name="referrer" content="no-referrer"><script>sources:[{file:"https://media.example.test/episode.mp4"}]</script>';
+  else throw Error('Unexpected URL '+url);
+  return{ok:true,status:200,url,text:async()=>html};
+ };
+ c.addMediaEntry=async(entry,referer,label,streams)=>streams.push({url:entry.url,name:'Krmizi',title:'Krmizi'});
+ const result=await c.resolveExtraSource({titles:['Collision','Çarpışma','اصطدام']},{name:'DDizi',bases:[base],search:'ddizi',language:'tr'},[{season:1,episode:1}]);
+ assert.equal(result.length,1);assert.equal(result[0].provider,'DDizi');assert.equal(result[0].language,'tr');
+ assert(calls.some(([url,opts])=>url===base+'/arama/'&&opts.method==='POST'));
+ assert(calls.some(([url])=>url.endsWith('/sayfa-2')));assert(!calls.some(([url])=>url.includes('/?s=')));
+});

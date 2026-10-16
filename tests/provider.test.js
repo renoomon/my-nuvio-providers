@@ -297,3 +297,65 @@ test('media probes and returned playback headers have the same request profile',
   assert.equal(streams.length,1);
   assert.deepEqual(captured,JSON.parse(JSON.stringify(streams[0].headers)));
 });
+
+test('catalog searches include Arabic aliases even when TMDB lists Turkish and English first', async () => {
+  const root='https://catalog.test', target=root+'/series/carpisma/';
+  const {ctx,calls}=runtime(url=> {
+    if(url===root+'/?s='+encodeURIComponent('اصطدام'))return response(`<div class="block-post"><a href="${target}" title="مسلسل اصطدام"><img alt="مسلسل اصطدام"></a></div>`,url);
+    if(url===target)return response('<h1>مسلسل اصطدام مترجم</h1>',url);
+    return response('',url);
+  });
+  const series=await ctx.resolveSeries({titles:['Çarpışma','Crash','اصطدام']},{bases:[root],index:'/turkish-series/'});
+  assert(series);assert.equal(series.url,target);
+  assert(calls.includes(root+'/?s='+encodeURIComponent('اصطدام')));
+});
+
+test('archive discovery accepts verified series cards outside the recent-episode layout', () => {
+  const {ctx}=runtime(()=>{});
+  for(const title of ['اصطدام','إيزل','العهد']) {
+    const html=`<div class="block-post"><a href="/series/older-show/" title="مسلسل ${title}"></a></div><a href="https://advert.test/series/older-show/" title="مسلسل ${title}">ad</a>`;
+    const cards=ctx.parseSeriesCards(html,'https://catalog.test/archive/',[title]);
+    assert.equal(cards.length,1);assert.equal(cards[0].url,'https://catalog.test/series/older-show/');
+  }
+});
+
+test('remaining aliases are searched before declaring an archived title absent', async () => {
+  const root='https://catalog.test', target=root+'/series/older-show/';
+  const {ctx,calls}=runtime(url=> {
+    if(url===root+'/?s='+encodeURIComponent('اسم محلي'))return response(`<a href="${target}" title="مسلسل اسم محلي"></a>`,url);
+    if(url===target)return response('<h1>مسلسل اسم محلي</h1>',url);
+    return response('',url);
+  });
+  const metadata={titles:['Original','English','الاسم الرسمي','اسم محلي']};
+  assert(await ctx.resolveSeries(metadata,{bases:[root],index:'/turkish-series/'}));
+  assert(calls.includes(root+'/?s='+encodeURIComponent('اسم محلي')));
+});
+
+test('a title substring cannot verify a different series through the same slug and poster', async () => {
+  const wrong='https://catalog.test/series/مسلسل-ولي-العهد/';
+  const {ctx}=runtime(url=>response('<h1>مسلسل ولي العهد</h1><title>مسلسل ولي العهد</title><div class="singleSeries"><div class="story">Veliaht</div><img src="/Veliaht-1.webp"></div>',url));
+  assert.equal(await ctx.verifySeriesCard({url:wrong,score:105},['العهد','Söz'],'https://catalog.test/'),null);
+  assert.equal(ctx.catalogTitleMatches('مسلسل ولي العهد الحلقة 1 مترجم',['العهد','Söz']),false);
+  assert.equal(ctx.catalogTitleMatches('مسلسل العهد الحلقة 1 مترجم',['العهد','Söz']),true);
+  assert.equal(ctx.catalogTitleMatches('Çarpışma 1. Bölüm Full HD İzle',['اصطدام','Çarpışma','Crash']),true);
+  assert.equal(ctx.catalogTitleMatches('Crash Landing Episode 1',['Crash']),false);
+});
+
+test('page-owned extensionless MP4 MIME URLs are parsed and still require media validation', async () => {
+  const media='https://redirector.googlevideo.com/videoplayback?id=public&mime=video%2Fmp4&quality=medium';
+  const {ctx}=runtime(url=>response('',url,200,'video/mp4'));
+  const entries=ctx.mediaEntriesFromHtml(`sources: [{file:'${media}',label:'360p',type:'mp4'}], poster:'https://catalog.test/image?id=1'`);
+  assert.equal(entries.length,1);assert.equal(entries[0].url,media);
+  const streams=[];await ctx.addMediaEntry(entries[0],'https://catalog.test/player/','Main',streams,{});
+  assert.equal(streams.length,1);assert.equal(streams[0].type,'mp4');assert.equal(streams[0].quality,'360p');
+  const invalid=runtime(url=>response('<html>unavailable</html>',url,200,'text/html')).ctx;
+  const rejected=[];await invalid.addMediaEntry(entries[0],'','Main',rejected,{});assert.equal(rejected.length,0);
+  assert.equal(ctx.directMedia('https://catalog.test/page?mime=text%2Fhtml'),false);
+});
+
+test('a series finale label is accepted without changing the episode identity', () => {
+  const {ctx}=runtime(()=>{});
+  assert.equal(ctx.catalogTitleMatches('Çarpışma 24. Bölüm Final İzle HD',['Çarpışma','اصطدام']),true);
+  assert.equal(ctx.catalogTitleMatches('مسلسل اصطدام الحلقة 24 والاخيرة مترجم',['اصطدام']),true);
+  assert.equal(ctx.catalogTitleMatches('ولي العهد الحلقة 24 والاخيرة',['العهد']),false);
+});

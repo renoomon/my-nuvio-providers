@@ -4,8 +4,8 @@
  */
 var EXTRA_SOURCES = [
   { name: "3skNews", bases: ["https://q.3sk.news", "https://f1.q3sk.monster"], strategy: "extra" },
-  { name: "DDizi", bases: ["https://www.ddizi.im", "https://www.ddizi.tel"], strategy: "extra", language: "tr" },
-  { name: "TVDiziler", bases: ["https://tvdiziler.tv"], strategy: "extra", language: "tr" },
+  { name: "DDizi", bases: ["https://www.ddizi.im", "https://www.ddizi.tel"], strategy: "extra", language: "tr", search: "ddizi" },
+  { name: "TVDiziler", bases: ["https://tvdiziler.tv"], strategy: "extra", language: "tr", search: "tvajax" },
   { name: "NOW", bases: ["https://www.nowtv.com.tr"], strategy: "extra", official: "now", language: "tr" },
   { name: "Shahid4U", bases: ["https://sh4u.buzz"], strategy: "extra", search: "php" }
 ];
@@ -51,7 +51,7 @@ function extraCatalogLinks(html, pageUrl, metadata, requests, seriesVerified) {
     var score = fieldMatchScore(identity, metadata.titles);
     var request = extraRequestMatch(identity, requests);
     // Navigation/category links are never treated as playable episode pages.
-    if (!request && !/\/(?:series|tvshows|dizi|diziler)\//i.test(url)) return;
+    if (!request && !/\/(?:series|tvshows|dizi|diziler)\/|\/category\.php\?cat=/i.test(url)) return;
     if (score < 80 && !(seriesVerified && request)) return;
     seen[extraUrlKey(url)] = true;
     links.push({ url: url, identity: identity, score: score, request: request });
@@ -63,6 +63,27 @@ function extraCatalogLinks(html, pageUrl, metadata, requests, seriesVerified) {
 function extraPageIdentity(html) {
   var $ = cheerio.load(html);
   return [$("h1").first().text() || "", $("meta[property='og:title']").first().attr("content") || "", $("title").first().text() || ""].join(" ");
+}
+
+function extraPageTitleMatches(html, metadata) {
+  var $ = cheerio.load(html), heading = $("h1").first().text() || "";
+  var fields = heading.trim() ? [heading] : [$("meta[property='og:title']").first().attr("content") || "",$("title").first().text() || ""];
+  function clean(value) {
+    return normalize(value).split(/\s[|]\s/)[0]
+      .replace(/^(?:مسلسل|المسلسل)\s+/g,"")
+      .replace(/\s+(?:الحلقه|حلقه)\s*(?:رقم\s*)?\d+[\s\S]*$/i,"")
+      .replace(/\s+\d+\s+bolum[\s\S]*$/i,"")
+      .replace(/\s+(?:izle|مترجم|مترجمه|مدبلج|مدبلجه|hd\d?|full|online|son bolum)[\s\S]*$/i,"").trim();
+  }
+  for (var f = 0; f < fields.length; f++) {
+    if (!fields[f]) continue;
+    if (typeof catalogTitleMatches === "function") {
+      if (catalogTitleMatches(fields[f],metadata.titles)) return true;
+    } else {
+      for (var t = 0; t < metadata.titles.length; t++) if (clean(fields[f]) === clean(metadata.titles[t])) return true;
+    }
+  }
+  return false;
 }
 
 function extraOwnedPlayerTargets(html, pageUrl) {
@@ -120,7 +141,7 @@ function extraResolveEpisode(candidate, metadata, requests, referer) {
   return fetchTextInfo(candidate.url, referer, "").then(function (page) {
     var identity = extraPageIdentity(page.html);
     var request = extraRequestMatch(identity, requests);
-    if (!request || fieldMatchScore(identity, metadata.titles) < 80) {
+    if (!request || !extraPageTitleMatches(page.html, metadata)) {
       logFailure("extra_episode_identity_mismatch", page.url);
       return [];
     }
@@ -133,46 +154,146 @@ function extraResolveEpisode(candidate, metadata, requests, referer) {
   }).catch(function (error) { logFailure("extra_episode_failed", errorMessage(error)); return []; });
 }
 
+function extraSearchRequests(metadata, source, base, requests) {
+  var titles = typeof catalogSearchTitles === "function" ? catalogSearchTitles(metadata) : metadata.titles || [];
+  var queries = [], seen = {};
+  function add(title) {
+    if (!title || seen[title]) return;
+    seen[title] = true; queries.push(title);
+  }
+  for (var i = 0; i < titles.length; i++) {
+    // The site's own PHP search has no series index API. A narrow episode
+    // query avoids losing early episodes behind many search-result pages.
+    if (source.search === "php" && /[\u0600-\u06ff]/.test(titles[i]) && requests.length) {
+      add(titles[i] + " الحلقة " + requests[0].episode);
+    }
+    add(titles[i]);
+  }
+  return queries.slice(0, 8).map(function (title) {
+    if (source.search === "ddizi") return {url:base + "/arama/",method:"POST",body:"arama=" + encodeURIComponent(title)};
+    if (source.search === "tvajax") return {url:base + "/search?qr=" + encodeURIComponent(title),method:"POST",body:"",jsonHtml:true};
+    return {url:base + (source.search === "php" ? "/search.php?keywords=" : "/?s=") + encodeURIComponent(title)};
+  });
+}
+
+function extraFetchCatalog(request, referer) {
+  if (!request.method || request.method === "GET") return fetchTextInfo(request.url, referer, "");
+  var headers = requestHeaders(referer, originOf(referer), request.jsonHtml ? "application/json,text/plain,*/*" : "text/html,*/*");
+  headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
+  if (request.jsonHtml) headers["X-Requested-With"] = "XMLHttpRequest";
+  var job = fetch(request.url,{method:request.method,headers:headers,body:request.body,skipSizeCheck:true}).then(function (response) {
+    if (!response || !response.ok) throw new Error("http_" + (response ? response.status : "no_response"));
+    return response.text().then(function (body) {
+      if (isChallenge(body)) throw new Error("cloudflare_challenge");
+      if (request.jsonHtml) {
+        try { var data = JSON.parse(body); body = data.success && typeof data.data === "string" ? data.data : ""; }
+        catch (_) { body = ""; }
+      }
+      return {html:String(body || ""),url:response.url || request.url,status:response.status};
+    });
+  });
+  return typeof withDeadline === "function" ? withDeadline(job,8000,"catalog_search_timeout") : job;
+}
+
+function extraNextCatalogPage(html, pageUrl) {
+  var $ = cheerio.load(html), current = String(pageUrl).match(/(?:[?&](?:page|paged)=|\/page\/)(\d+)/i);
+  var currentNumber = current ? parseInt(current[1],10) : 1, next = "";
+  var ddizi = /\/sayfa-\d+/i.test(html), ddCurrent = String(pageUrl).match(/\/sayfa-(\d+)/i);
+  if (ddizi) currentNumber = ddCurrent ? parseInt(ddCurrent[1],10) : 0;
+  $("a[rel=next], .pagination a[href], .wp-pagenavi a[href], .page-numbers[href]").each(function (_,element) {
+    var a = wrap($,element), url = absUrl(a.attr("href"),pageUrl);
+    if (originOf(url) !== originOf(pageUrl)) return;
+    var number = url.match(ddizi ? /\/sayfa-(\d+)/i : /(?:[?&](?:page|paged)=|\/page\/)(\d+)/i);
+    if (number && parseInt(number[1],10) === currentNumber + 1) next = url;
+  });
+  return next;
+}
+
+function extraLastCatalogPage(html, pageUrl, requests) {
+  var $ = cheerio.load(html), target = 0, minimum = Infinity, last = "", highest = -1;
+  for (var r = 0; r < requests.length; r++) if (requests[r].season === 1 && (!target || requests[r].episode < target)) target = requests[r].episode;
+  if (!target) return "";
+  $("a[href]").each(function (_,element) {
+    var a = wrap($,element), url = absUrl(a.attr("href"),pageUrl);
+    if (originOf(url) !== originOf(pageUrl)) return;
+    var number = extraEpisodeNumber(extraAnchorIdentity(a));
+    if (number && number < minimum) minimum = number;
+  });
+  if (!(minimum > target && minimum < Infinity)) return "";
+  $(".pagination a[href], .wp-pagenavi a[href], .page-numbers[href]").each(function (_,element) {
+    var url = absUrl(wrap($,element).attr("href"),pageUrl), number = url.match(/(?:[?&](?:page|paged)=|\/page\/|\/sayfa-)(\d+)/i);
+    if (originOf(url) === originOf(pageUrl) && number && parseInt(number[1],10) > highest) {highest=parseInt(number[1],10);last=url;}
+  });
+  return last;
+}
+
 function resolveExtraSource(metadata, source, requests) {
   if (source.official === "now") return resolveNowSource(metadata, source, requests);
-  var bases = source.bases || [], baseIndex = 0;
+  var bases = source.bases || [], baseIndex = 0, triedBases = {};
   function nextBase() {
+    while (baseIndex < bases.length && triedBases[bases[baseIndex]]) baseIndex++;
     if (baseIndex >= bases.length) return Promise.resolve([]);
-    var base = bases[baseIndex++], pending = [base + "/"], seenPages = {}, seenEpisodes = {}, checked = 0;
-    // Search is bounded per source; the latest page handles current episodes if
-    // a WordPress search endpoint is unavailable. No guessed episode URL is used.
-    for (var t = 0; t < metadata.titles.length && t < 3; t++) pending.push(base + (source.search === "php" ? "/search.php?keywords=" : "/?s=") + encodeURIComponent(metadata.titles[t]));
-    function nextPage() {
-      if (!pending.length || checked >= 7) return Promise.resolve([]);
-      var url = pending.shift();
-      if (seenPages[extraUrlKey(url)]) return nextPage();
-      seenPages[extraUrlKey(url)] = true; checked++;
-      return fetchTextInfo(url, base + "/", "").then(function (page) {
-        var seriesVerified = fieldMatchScore(extraPageIdentity(page.html), metadata.titles) >= 80 && !extraEpisodeNumber(extraPageIdentity(page.html));
-        var links = extraCatalogLinks(page.html, page.url, metadata, requests, seriesVerified), episodes = [];
-        for (var i = 0; i < links.length; i++) {
-          if (links[i].request && !seenEpisodes[extraUrlKey(links[i].url)]) { seenEpisodes[extraUrlKey(links[i].url)] = true; episodes.push(links[i]); }
-          else if (!links[i].request && pending.length < 6) pending.unshift(links[i].url);
-        }
-        return Promise.all(episodes.slice(0, 3).map(function (candidate) { return extraResolveEpisode(candidate, metadata, requests, page.url); })).then(function (parts) {
-          var result = [];
-          for (var p = 0; p < parts.length; p++) result = result.concat(parts[p]);
-          return result.length ? result : nextPage();
+    var base = bases[baseIndex++];triedBases[base] = true;
+    var seenPages = {}, seenEpisodes = {};
+    function fetchPages(requestsToFetch) {
+      return Promise.all(requestsToFetch.map(function (request) {
+        var key = request.url + " " + (request.body || "");
+        if (seenPages[key]) return Promise.resolve(null);
+        seenPages[key] = true;
+        return extraFetchCatalog(request,base + "/").catch(function (error) {
+          logFailure("extra_catalog_failed",source.name + " " + errorMessage(error));return null;
         });
-      }).catch(function (error) {
-        logFailure("extra_catalog_failed", source.name + " " + errorMessage(error));
-        return nextPage();
+      }));
+    }
+    function scan(pages, depth) {
+      var episodes = [], series = [], pagination = [], seenSeries = {};
+      for (var p = 0; p < pages.length; p++) {
+        var page = pages[p]; if (!page) continue;
+        var self = extraPageIdentity(page.html);
+        var seriesVerified = extraPageTitleMatches(page.html,metadata) && !extraEpisodeNumber(self);
+        var links = extraCatalogLinks(page.html,page.url,metadata,requests,seriesVerified);
+        for (var i = 0; i < links.length; i++) {
+          if (links[i].request && !seenEpisodes[extraUrlKey(links[i].url)]) {
+            seenEpisodes[extraUrlKey(links[i].url)] = true;
+            episodes.push({candidate:links[i],referer:page.url});
+          } else if (!links[i].request && !seenSeries[extraUrlKey(links[i].url)]) {
+            seenSeries[extraUrlKey(links[i].url)] = true;series.push({url:links[i].url});
+          }
+        }
+        var last = extraLastCatalogPage(page.html,page.url,requests);
+        if (last && extraUrlKey(last) !== extraUrlKey(page.url)) pagination.push({url:last});
+        var next = extraNextCatalogPage(page.html,page.url);
+        if (next && next !== last) pagination.push({url:next});
+      }
+      return Promise.all(episodes.slice(0,4).map(function (item) {
+        return extraResolveEpisode(item.candidate,metadata,requests,item.referer);
+      })).then(function (parts) {
+        var result = [];for (var n = 0; n < parts.length; n++) result = result.concat(parts[n]);
+        if (result.length || depth >= 3) return result;
+        // Series links are owned by the catalog and must still match the show.
+        // Search pagination follows only a page-owned next-page link.
+        var nextRequests = series.slice(0,3).concat(pagination.slice(0,2));
+        if (!nextRequests.length) return [];
+        return fetchPages(nextRequests).then(function (nextPages) {return scan(nextPages,depth + 1);});
       });
     }
-    return nextPage().then(function (streams) { return streams.length ? streams : nextBase(); });
+    // Current episodes stay cheap. Archive searches use the source's actual
+    // public form/API with Arabic, Turkish, English and accentless aliases.
+    return fetchPages([{url:base + "/"}]).then(function (pages) {
+      if (pages[0] && originOf(pages[0].url)) {base=originOf(pages[0].url);triedBases[base]=true;}
+      return scan(pages,0);
+    }).then(function (streams) {
+      if (streams.length) return streams;
+      return fetchPages(extraSearchRequests(metadata,source,base,requests)).then(function (pages) {return scan(pages,0);});
+    }).then(function (streams) {return streams.length ? streams : nextBase();});
   }
   return nextBase().then(function (streams) {
     var deduped = [], seen = {};
     for (var i = 0; i < streams.length; i++) {
       if (seen[streams[i].url]) continue;
       seen[streams[i].url] = true;
-      streams[i].name = String(streams[i].name || "Krmizi").replace(/^Krmizi/, source.name);
-      streams[i].title = String(streams[i].title || "Krmizi").replace(/^Krmizi/, source.name);
+      streams[i].name = String(streams[i].name || "Krmizi").replace(/^Krmizi/,source.name);
+      streams[i].title = String(streams[i].title || "Krmizi").replace(/^Krmizi/,source.name);
       streams[i].provider = source.name;
       if (source.language) streams[i].language = source.language;
       deduped.push(streams[i]);
@@ -198,7 +319,7 @@ function nowOwnedLinks(html, pageUrl, metadata, requests) {
           episodes.push({ url: url, request: requests[r] }); seen[extraUrlKey(url)] = true; break;
         }
       }
-    } else if (/\/[^/]+\/izle\/?$/i.test(path)) {
+    } else if (/\/[^/]+\/izle\/?$/i.test(path) || /^https:\/\/www\.nowtv\.com\.tr\/[^/?]+\/?$/i.test(path)) {
       series.push(url); seen[extraUrlKey(url)] = true;
     }
   });
@@ -208,7 +329,7 @@ function nowOwnedLinks(html, pageUrl, metadata, requests) {
 function nowResolveEpisode(candidate, metadata) {
   return fetchTextInfo(candidate.url, "https://www.nowtv.com.tr/", "").then(function (page) {
     var identity = extraPageIdentity(page.html);
-    if (fieldMatchScore(identity, metadata.titles) < 80 || extraEpisodeNumber(identity) !== candidate.request.episode) return [];
+    if (!extraPageTitleMatches(page.html, metadata) || extraEpisodeNumber(identity) !== candidate.request.episode) return [];
     var $ = cheerio.load(page.html);
     var id = $(".vod-player[data-video-id]").first().attr("data-video-id");
     if (!/^\d+$/.test(String(id || ""))) return [];
@@ -238,24 +359,41 @@ function nowResolveEpisode(candidate, metadata) {
   }).catch(function (error) { logFailure("official_episode_failed", "NOW " + errorMessage(error)); return []; });
 }
 
+function nowArchiveLinks(html, pageUrl) {
+  var $ = cheerio.load(html), links = [], seen = {};
+  $("a[href]").each(function (_,element) {
+    var url = absUrl(wrap($,element).attr("href"),pageUrl);
+    if (originOf(url) !== "https://www.nowtv.com.tr" || !/\/(?:dizi-izle|dizi-arsivi|arsiv)\/?$/i.test(url) || seen[url]) return;
+    seen[url]=true;links.push(url);
+  });
+  return links.slice(0,3);
+}
+
 function resolveNowSource(metadata, source, requests) {
-  return fetchTextInfo("https://www.nowtv.com.tr/", "", "").then(function (home) {
-    var links = nowOwnedLinks(home.html, home.url, metadata, requests);
-    var jobs = links.episodes.map(function (candidate) { return nowResolveEpisode(candidate, metadata); });
+  function resolveCatalog(page) {
+    var links = nowOwnedLinks(page.html,page.url,metadata,requests);
+    var jobs = links.episodes.map(function (candidate) {return nowResolveEpisode(candidate,metadata);});
     var seriesJobs = (links.episodes.length ? [] : links.series).map(function (url) {
-      return fetchTextInfo(url, home.url, "").then(function (series) {
-        var own = nowOwnedLinks(series.html, series.url, metadata, requests);
-        return Promise.all(own.episodes.map(function (candidate) { return nowResolveEpisode(candidate, metadata); })).then(function (parts) {
-          var result = []; for (var i = 0; i < parts.length; i++) result = result.concat(parts[i]); return result;
+      return fetchTextInfo(url,page.url,"").then(function (series) {
+        if (!extraPageTitleMatches(series.html,metadata)) return [];
+        var own = nowOwnedLinks(series.html,series.url,metadata,requests);
+        return Promise.all(own.episodes.map(function (candidate) {return nowResolveEpisode(candidate,metadata);})).then(function (parts) {
+          var result=[];for(var i=0;i<parts.length;i++)result=result.concat(parts[i]);return result;
         });
-      }).catch(function () { return []; });
+      }).catch(function(){return [];});
     });
-    return Promise.all(jobs.concat(seriesJobs)).then(function (parts) {
-      var result = [], seen = {};
-      for (var i = 0; i < parts.length; i++) for (var p = 0; p < parts[i].length; p++) {
-        if (!seen[parts[i][p].url]) { seen[parts[i][p].url] = true; result.push(parts[i][p]); }
-      }
+    return Promise.all(jobs.concat(seriesJobs)).then(function(parts){
+      var result=[],seen={};
+      for(var i=0;i<parts.length;i++)for(var p=0;p<parts[i].length;p++)if(!seen[parts[i][p].url]){seen[parts[i][p].url]=true;result.push(parts[i][p]);}
       return result;
     });
-  }).catch(function (error) { logFailure("official_source_failed", "NOW " + errorMessage(error)); return []; });
+  }
+  return fetchTextInfo("https://www.nowtv.com.tr/","","").then(function(home){
+    return resolveCatalog(home).then(function(streams){
+      if(streams.length)return streams;
+      return Promise.all(nowArchiveLinks(home.html,home.url).map(function(url){
+        return fetchTextInfo(url,home.url,"").then(resolveCatalog).catch(function(){return [];});
+      })).then(function(parts){var result=[];for(var i=0;i<parts.length;i++)result=result.concat(parts[i]);return result;});
+    });
+  }).catch(function(error){logFailure("official_source_failed","NOW "+errorMessage(error));return [];});
 }
