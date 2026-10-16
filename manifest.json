@@ -1,14 +1,14 @@
 {
   "name": "My Nuvio Providers",
-  "version": "1.7.1",
-  "description": "Turkish series with combined results from Krmizi, ShoofLive and Qisat",
+  "version": "1.8.0",
+  "description": "Parallel Turkish series sources with dual episode numbering and bounded requests",
   "author": "renoomon",
   "scrapers": [
     {
       "id": "krmizi",
-      "name": "Krmizi + ShoofLive + Qisat | مسلسلات تركية",
-      "description": "All-source search with matched playback headers and verified media endpoints",
-      "version": "0.10.1",
+      "name": "Turkish Sources | مسلسلات تركية",
+      "description": "All-source search, season and absolute episode numbers, validated playback",
+      "version": "0.11.0",
       "filename": "providers/krmizi.js",
       "supportedTypes": [
         "tv"

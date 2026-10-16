@@ -25,7 +25,7 @@ function runtime(fetch, globals = {}) {
     require: name => { assert.equal(name, 'cheerio-without-node-native'); return { load: shimLoad }; },
     fetch: (url, opts) => { calls.push(url); return Promise.resolve().then(() => fetch(url, opts)); },
     console: { log: (...args) => logs.push(args.join(' ')) }, ...globals };
-  vm.runInNewContext(code, ctx);
+  vm.runInNewContext(code, ctx);ctx.EXTRA_SOURCES=[];
   return { ctx, calls, logs };
 }
 const response = (body, url, status = 200, contentType = '') => ({ ok: status >= 200 && status < 300,
