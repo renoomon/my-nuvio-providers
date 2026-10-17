@@ -69,7 +69,7 @@ function threeickLinks(page, metadata, requests, verifiedSeries) {
   $("a[href]").each(function(_,element) {
     var a = wrap($,element), url = threeickOwnedUrl(a.attr("href"),page.url), identity = extraAnchorIdentity(a);
     if (!url || seen[url] || /mudblij|مدبلج|اعلان|إعلان|trailer|fragman/i.test(url + " " + identity)) return;
-    if (/\/watch\/tvshows\//i.test(url) && fieldMatchScore(identity,metadata.titles) >= 80) {
+    if (/\/watch\/tvshows\//i.test(url) && fieldMatchScore(identity + " " + url,metadata.titles) >= 80) {
       seen[url] = true; series.push(url); return;
     }
     if (!/\/watch\/episodes\/[^/?]+\/?$/i.test(url)) return;
@@ -119,11 +119,12 @@ function resolve3ickSource(metadata, source, requests) {
     if (index >= source.bases.length) return Promise.resolve([]);
     return session.get(source.bases[index++] + "/","").then(function(home) {
       var titles = extraQueryTitles(metadata);
-      function scan(page, verified) {
-        var links = threeickLinks(page,metadata,requests,verified);
-        var jobs = links.episodes.filter(function(candidate){if(seenEpisodes[candidate.url])return false;seenEpisodes[candidate.url]=true;return true;}).map(function(candidate){return threeickResolveEpisode(candidate,metadata,requests,session,page.url);});
+      function scan(page, verified, scanMeta) {
+        var effective = scanMeta || metadata;
+        var links = threeickLinks(page,effective,requests,verified);
+        var jobs = links.episodes.filter(function(candidate){if(seenEpisodes[candidate.url])return false;seenEpisodes[candidate.url]=true;return true;}).map(function(candidate){return threeickResolveEpisode(candidate,effective,requests,session,page.url);});
         if (!verified) jobs = jobs.concat(links.series.map(function(url) {
-          return session.get(url,page.url).then(function(series) {return threeickTitleMatches(series.html,metadata) ? scan(series,true) : [];}).catch(function(){return [];});
+          return session.get(url,page.url).then(function(series) {return threeickTitleMatches(series.html,effective) ? scan(series,true,effective) : [];}).catch(function(){return [];});
         }));
         return Promise.all(jobs).then(function(parts) {var result=[];for(var i=0;i<parts.length;i++)result=result.concat(parts[i]);return result;});
       }
@@ -137,21 +138,34 @@ function resolve3ickSource(metadata, source, requests) {
           jobs.push(session.get(pageUrl, home.url).catch(function () { return null; }));
         }
         return Promise.all(jobs).then(function (pages) {
-          var series = [], seen = {};
+          var strong = [], weak = [], seen = {};
           for (var p = 0; p < pages.length; p++) {
             if (!pages[p]) continue;
-            var links = threeickLinks(pages[p], metadata, requests, false);
-            for (var l = 0; l < links.series.length; l++) {
-              var url = links.series[l];
-              if (seen[url]) continue;
-              seen[url] = true;
-              series.push(url);
-            }
+            var $ = cheerio.load(pages[p].html);
+            $("a[href]").each(function (_, element) {
+              var a = wrap($, element), url = threeickOwnedUrl(a.attr("href"), pages[p].url);
+              if (!url || !/\/watch\/tvshows\//i.test(url)) return;
+              var identity = extraAnchorIdentity(a);
+              if (/mudblij|\u0645\u062f\u0628\u0644\u062c/i.test(url + " " + identity)) return;
+              var key = extraUrlKey(url);
+              if (seen[key]) return;
+              if (fieldMatchScore(identity + " " + url, metadata.titles) >= 80) {
+                seen[key] = true; strong.push({ url: url, weak: false });
+              } else if (extraSlugAlias(url, metadata.titles)) {
+                seen[key] = true; weak.push({ url: url, weak: true });
+              }
+            });
           }
-          return Promise.all(series.slice(0,3).map(function (url) {
-            return session.get(url, home.url).then(function (seriesPage) {
+          var candidates = strong.slice(0, 2).concat(weak.slice(0, 2));
+          return Promise.all(candidates.map(function (candidate) {
+            return session.get(candidate.url, home.url).then(function (seriesPage) {
+              var heading = cheerio.load(seriesPage.html)("h1").first().text() || "";
+              if (candidate.weak) {
+                if (!heading) return [];
+                return scan(seriesPage, true, { titles: metadata.titles.concat([heading]), seasons: metadata.seasons });
+              }
               if (!threeickTitleMatches(seriesPage.html, metadata)) return [];
-              return scan(seriesPage, true);
+              return scan(seriesPage, true, metadata);
             }).catch(function () { return []; });
           })).then(flatten);
         });
@@ -323,7 +337,7 @@ function extraResolveEpisode(candidate, metadata, requests, referer) {
 }
 
 function extraSearchRequests(metadata, source, base, requests) {
-  var titles = typeof catalogSearchTitles === "function" ? catalogSearchTitles(metadata) : metadata.titles || [];
+  var titles = typeof extraQueryTitles === "function" ? extraQueryTitles(metadata) : metadata.titles || [];
   var queries = [], seen = {};
   function add(title) {
     if (!title || seen[title]) return;
