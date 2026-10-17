@@ -1,15 +1,15 @@
 {
   "name": "My Nuvio Providers",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "Parallel Arabic-subtitled Turkish series catalogs and archive search",
   "author": "renoomon",
   "scrapers": [
     {
       "id": "krmizi",
       "name": "Turkish Sources | مسلسلات تركية",
-      "description": "Six Arabic-translated catalogs with verified Arabic-subtitled archive streams",
-      "version": "0.15.0",
-      "filename": "providers/krmizi.js?v=0.15.0",
+      "description": "Seven Arabic-translated catalogs with verified Arabic-subtitled archive streams",
+      "version": "0.16.0",
+      "filename": "providers/krmizi.js?v=0.16.0",
       "supportedTypes": [
         "tv"
       ],

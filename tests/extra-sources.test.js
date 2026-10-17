@@ -8,10 +8,10 @@ const fragment=fs.readFileSync(require.resolve('../providers/extra-sources.fragm
 function setup(){const ctx={module:{exports:{}},require:()=>cheerio,console:{log(){}},fetch:()=>Promise.reject(Error('unexpected network'))};vm.createContext(ctx);vm.runInContext(core+'\n'+fragment,ctx);return ctx;}
 const metadata={titles:['تحت الأرض','Yeraltı'],year:2026};
 
-test('only the six Arabic-translated catalogs are registered',()=>{
+test('only the seven Arabic-translated catalogs are registered',()=>{
  const c=setup();
  assert.deepEqual(Array.from(c.SOURCES,s=>s.name).sort(),['Krmizi','Qisat','ShoofLive']);
- assert.deepEqual(Array.from(c.EXTRA_SOURCES,s=>s.name).sort(),['3ick','3skNews','Shahid4U']);
+ assert.deepEqual(Array.from(c.EXTRA_SOURCES,s=>s.name).sort(),['3ick','3skNews','Qeseh','Shahid4U']);
  const all=c.SOURCES.concat(c.EXTRA_SOURCES);
  for(const removed of ['NOW','DDizi','TVDiziler']) assert(!all.some(s=>s.name===removed));
  assert(all.every(s=>String(s.language||'ar')==='ar'));
@@ -90,6 +90,24 @@ test('a verified Arabic catalog series page reaches its own episode player',asyn
 test('strict owned heading rejects العهد inside ولي العهد even when a secondary title claims otherwise',()=>{
  const c=setup();assert.equal(c.extraPageTitleMatches('<h1>مسلسل ولي العهد الحلقة 1</h1><title>مسلسل العهد الحلقة 1</title>',{titles:['العهد','Söz']}),false);
  assert.equal(c.extraPageTitleMatches('<h1>مسلسل العهد الحلقة 1</h1>',{titles:['العهد','Söz']}),true);
+});
+
+
+test('Qeseh follows search, archive page, qesen wrapper and Arab HD embed',async()=>{
+ const c=setup(),base='https://wwv.qeseh.com',calls=[];
+ const pages={
+  [base+'/?s='+encodeURIComponent('العشق الممنوع')]:'<a href="https://wwv.qeseh.com/yeni-show/forbd/">مسلسل العشق الممنوع</a>',
+  'https://wwv.qeseh.com/yeni-show/forbd/':'<h1>العشق الممنوع</h1><a href="https://wwv.qeseh.com/clarus/ask-i-memnu-episode-1/">الحلقة 1</a><a href="https://wwv.qeseh.com/clarus/ask-i-memnu-episode-79/">الحلقة 79</a>',
+  'https://wwv.qeseh.com/clarus/ask-i-memnu-episode-1/':'<title>العشق الممنوع - الحلقة 1</title><a href="https://qesen.net/watch?post=abc">مشاهدة</a>',
+  'https://qesen.net/watch?post=abc':'<iframe src="https://arabhd.onl/embed-6cch.html"></iframe>',
+  'https://arabhd.onl/embed-6cch.html':'<script>sources:[{file:"https://media.test/master.m3u8"}]</script>'
+ };
+ c.fetch=async(url)=>{calls.push(url);if(pages[url]===undefined)throw Error('unexpected '+url);return{ok:true,status:200,url,text:async()=>pages[url]};};
+ c.addMediaEntry=async(entry,referer,label,streams)=>{streams.push({url:entry.url,name:'Krmizi',title:'Krmizi',quality:'720p'});};
+ const result=await c.resolveQesehSource({titles:['العشق الممنوع','Aşk-ı Memnu']},{name:'Qeseh',bases:[base],search:'qeseh',language:'ar'},[{season:1,episode:1}]);
+ assert.equal(result.length,1);assert.equal(result[0].provider,'Qeseh');assert.equal(result[0].language,'ar');assert.equal(result[0].quality,'720p');
+ assert(calls.includes('https://qesen.net/watch?post=abc'));assert(calls.includes('https://arabhd.onl/embed-6cch.html'));
+ assert(!calls.some(url=>url.includes('episode-79')));
 });
 
 test('3ick mirror normalization is limited to its numbered HTTPS catalog hosts',()=>{
