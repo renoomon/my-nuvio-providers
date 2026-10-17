@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.12.0
+ * Version: 0.13.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
@@ -16,7 +16,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.12.0";
+var VERSION = "0.13.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
   { name: "Krmizi", bases: ["https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
@@ -438,11 +438,11 @@ function catalogTitleMatches(value, titles) {
     .replace(/\b(?:19|20)\d{2}\b/g, " ")
     .replace(/\bs\d{1,2}e\d{1,4}\b/g, " ")
     .replace(/(?:الموسم)\s+(?:الاول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر|\d{1,2})/g, " ")
-    .replace(/(?:الحلقه|حلقه)\s+(?:رقم\s+)?\d{1,4}(?:\s+(?:و?الاخيره|الاولى))?/g, " ")
+    .replace(/(?:الحلقه|حلقه)\s+(?:رقم\s+)?\d{1,4}(?:\s+(?:و?الاخيره|الاولي))?/g, " ")
     .replace(/\b(?:season|episode|ep)\s*\d{1,4}\b/g, " ")
     .replace(/\b\d{1,4}\s*bolum\b|\bbolum\s*\d{1,4}\b/g, " ")
     .replace(/\b(?:full|tek|parca|izle|final|finali|finale|hd\d?|hq|online|series|tv|show|ddizi|tvdiziler|shahid4u)\b/g, " ")
-    .replace(/(?:^|\s)(?:مسلسل|المسلسل|مشاهده|تحميل|مترجم|مترجمه|مدبلج|مدبلجه|كامل|كامله|الحلقات|جميع|اونلاين|قرمزي|شوف لايف|شاهد فور يو|قصه عشق)(?=\s|$)/g, " ")
+    .replace(/(?:^|\s)(?:مسلسل|المسلسل|مشاهده|تحميل|مترجم|مترجمه|مدبلج|مدبلجه|كامل|كامله|الحلقات|جميع|اونلاين|قرمزي|شوف لايف|شاهد فور يو|قصه عشق|الاخيره|والاخيره)(?=\s|$)/g, " ")
     .replace(/\s+/g, " ").trim();
   return !text;
 }
@@ -973,8 +973,24 @@ function mediaEntriesFromHtml(html) {
   return entries;
 }
 
+function canonicalEmbedUrl(url) {
+  var value = cleanUrlValue(url);
+  // Current, page-owned AlbaPlayer entries corroborate these host migrations
+  // with the same opaque embed IDs. Preserve the ID; never invent a player or
+  // episode URL. Media still passes the normal playlist/segment validation.
+  var match = value.match(/^https?:\/\/(?:www\.)?(v\.albrq\.news|anaturk\.cc|vidoba\.cc|vidspeed\.cc)(\/embed-[a-z0-9]{8,24}\.html)([?#].*)?$/i);
+  if (!match) return value;
+  var hosts = {
+    "v.albrq.news": "cdnplus.sbs",
+    "anaturk.cc": "anafast.cyou",
+    "vidoba.cc": "vidoba.cyou",
+    "vidspeed.cc": "vidspeed.space"
+  };
+  return "https://" + hosts[match[1].toLowerCase()] + match[2] + (match[3] || "");
+}
+
 function supportedDirectEmbed(url) {
-  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:cdnplus\.(?:space|sbs|org)|mp4plus\.cyou|anafast\.cyou|vidoba\.cyou|vidspeed\.space|larhu\.website|morencius\.com)\//i.test(String(url || ""));
+  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:cdnplus\.(?:space|sbs|org)|mp4plus\.cyou|anafast\.cyou|vidoba\.cyou|vidspeed\.space|larhu\.website|morencius\.com)\//i.test(canonicalEmbedUrl(url));
 }
 
 function dailymotionId(url) {
@@ -1152,7 +1168,7 @@ function resolveDailymotion(url, referer, serverName, streams, seenStreams) {
 
 function resolveEmbedTarget(target, expected, streams, seenStreams) {
   if (!target || !target.url) return Promise.resolve();
-  var url = target.url;
+  var url = canonicalEmbedUrl(target.url);
 
   if (directMedia(url)) {
     return addMediaEntry({ url: url, quality: qualityFromText(url) }, target.referer, target.label, streams, seenStreams);

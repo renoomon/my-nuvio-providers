@@ -359,3 +359,40 @@ test('a series finale label is accepted without changing the episode identity', 
   assert.equal(ctx.catalogTitleMatches('مسلسل اصطدام الحلقة 24 والاخيرة مترجم',['اصطدام']),true);
   assert.equal(ctx.catalogTitleMatches('ولي العهد الحلقة 24 والاخيرة',['العهد']),false);
 });
+
+test('corroborated legacy player migrations preserve opaque embed identity and restrict host/path', () => {
+  const {ctx}=runtime(()=>{});
+  const mappings=[['v.albrq.news','cdnplus.sbs'],['anaturk.cc','anafast.cyou'],['vidoba.cc','vidoba.cyou'],['vidspeed.cc','vidspeed.space']];
+  for(const [oldHost,newHost] of mappings) {
+    const old='https://'+oldHost+'/embed-exampleid123.html?view=1';
+    assert.equal(ctx.canonicalEmbedUrl(old),'https://'+newHost+'/embed-exampleid123.html?view=1');
+    assert.equal(ctx.supportedDirectEmbed(old),true);
+  }
+  for(const url of ['https://v.albrq.news/catalog/episode-1','https://v.albrq.news.evil.test/embed-exampleid123.html','https://other.test/embed-exampleid123.html']) {
+    assert.equal(ctx.canonicalEmbedUrl(url),url);assert.equal(ctx.supportedDirectEmbed(url),false);
+  }
+});
+
+test('an archived Arabic episode player uses the migrated host and validates actual media before return', async () => {
+  const legacy='https://v.albrq.news/embed-exampleid123.html',current='https://cdnplus.sbs/embed-exampleid123.html';
+  const {ctx,calls}=runtime((url,opts)=>{
+    if(url===current)return response(`sources:[{file:'${master}'}]`,url);
+    if(url===master)return response(playlist,url);
+    if(url.startsWith('https://media.example.test/'))return mediaResponse(url,opts);
+    throw Error('unexpected request '+url);
+  });
+  const streams=[];
+  await ctx.resolveEmbedTarget({url:legacy,referer:'https://3sktvtr.com/watch/owned',label:'CDNPlus'},{season:1,episode:1},streams,{});
+  assert.equal(streams.length,2);assert(calls.includes(current));assert(!calls.includes(legacy));
+  for(const stream of streams)assert.equal(stream.headers.Referer,current);
+  const broken=runtime(url=>url===current?response(`sources:[{file:'${master}'}]`,url):response('<html>expired</html>',url,200,'text/html')).ctx;
+  const invalid=[];await broken.resolveEmbedTarget({url:legacy,referer:'https://3sktvtr.com/watch/owned',label:'CDNPlus'},{season:1,episode:1},invalid,{});
+  assert.equal(invalid.length,0);
+});
+
+test('Arabic finale branding and normalized feminine first-episode labels preserve exact title matching', () => {
+  const {ctx}=runtime(()=>{});
+  assert.equal(ctx.catalogTitleMatches('مسلسل اصطدام الحلقة 24 | قصة عشق - الاخيرة',['اصطدام','Çarpışma']),true);
+  assert.equal(ctx.catalogTitleMatches('مسلسل العهد الموسم الاول الحلقة 1 الاولى مترجمة - HD',['العهد','Söz']),true);
+  assert.equal(ctx.catalogTitleMatches('مسلسل ولي العهد الحلقة 1 الاولى مترجمة - HD',['العهد','Söz']),false);
+});
