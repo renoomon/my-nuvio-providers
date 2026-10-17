@@ -536,6 +536,20 @@ function extraQueryTitles(metadata) {
   }
   var i;
   for (i = 0; i < base.length && i < 8; i++) add(base[i]);
+  // Sites differ on the Arabic article ("طائر الرفراف" vs "الطائر الرفراف").
+  var variants = 0;
+  for (i = 0; i < base.length && variants < 4; i++) {
+    var original = String(base[i] || "");
+    if (!/^[\u0600-\u06ff]/.test(original)) continue;
+    var words = original.split(" ");
+    if (!words[0]) continue;
+    var variant = words.slice(0);
+    if (words[0].indexOf("\u0627\u0644") === 0 && words[0].length > 3) variant[0] = words[0].slice(2);
+    else if (words[0].length >= 3) variant[0] = "\u0627\u0644" + words[0];
+    else continue;
+    add(variant.join(" "));
+    variants++;
+  }
   var added = 0;
   for (i = 0; i < base.length && added < 6; i++) {
     var title = String(base[i] || "");
@@ -637,6 +651,107 @@ function qesehEmbedUrls(html, pageUrl) {
 // page owns a qesen.net player wrapper whose Arab HD iframe unpacks to HLS.
 // No guessed episode URLs and no stored tokens: the signed media URL is always
 // resolved at request time.
+
+// A catalog can list a different Arabic name than TMDB ("السلطانة كوسم" vs
+// "السلطانة قسم") while the URL keeps the Turkish original slug. One distinctive
+// slug token is enough to probe the page; the page's own title then becomes an
+// alias for the episode checks. Full identity is still enforced by the episode
+// number and the owned URLs.
+function extraSlugAlias(url, titles) {
+  var tokens = String(url || "").toLowerCase().split(/[^a-z0-9]+/).filter(function (token) {
+    return token.length >= 5;
+  });
+  if (!tokens.length) return false;
+  for (var i = 0; i < titles.length; i++) {
+    var words = normalize(titles[i]).split(" ").filter(function (word) {
+      return /^[a-z0-9]{5,}$/.test(word);
+    });
+    for (var w = 0; w < words.length; w++) if (tokens.indexOf(words[w]) >= 0) return true;
+  }
+  return false;
+}
+
+function qesehCatalogFallback(base, metadata, requests) {
+  var pageUrls = [], page;
+  for (page = 1; page <= 8; page++) {
+    pageUrls.push(page === 1 ? base + "/discover/" : base + "/discover/page/" + page + "/");
+  }
+  return Promise.all(pageUrls.map(function (url) {
+    return fetchTextInfo(url, base + "/", "").catch(function () { return null; });
+  })).then(function (pages) {
+    var candidates = [], seen = {};
+    for (var p = 0; p < pages.length; p++) {
+      if (!pages[p]) continue;
+      var $ = cheerio.load(pages[p].html);
+      $("a[href]").each(function (_, element) {
+        var a = wrap($, element), url = absUrl(a.attr("href"), pages[p].url);
+        if (!url || originOf(url) !== originOf(pages[p].url) || !/\/yeni-show\//i.test(url)) return;
+        var key = extraUrlKey(url);
+        if (seen[key]) return;
+        var identity = extraAnchorIdentity(a);
+        var strong = fieldMatchScore(identity, metadata.titles) >= 80 ||
+          (typeof catalogTitleMatches === "function" && catalogTitleMatches(identity, metadata.titles));
+        if (!strong && !extraSlugAlias(url, metadata.titles)) return;
+        seen[key] = true;
+        candidates.push({ url: url, title: identity.replace(/\s+/g, " ").trim(), weak: !strong });
+      });
+    }
+    if (!candidates.length) return [];
+    candidates.sort(function (left, right) { return (left.weak ? 1 : 0) - (right.weak ? 1 : 0); });
+    return Promise.all(candidates.slice(0, 3).map(function (entry) {
+      return fetchTextInfo(entry.url, base + "/", "").catch(function () { return null; }).then(function (result) {
+        if (!result) return null;
+        var heading = cheerio.load(result.html)("h1").first().text() || entry.title;
+        return { html: result.html, url: result.url, title: heading };
+      });
+    })).then(function (seriesPages) {
+      seriesPages = seriesPages.filter(Boolean);
+      var episodes = [], seenEpisodes = {};
+      for (var sp = 0; sp < seriesPages.length; sp++) {
+        var list = qesehEpisodeLinks(seriesPages[sp].html, seriesPages[sp].url, requests, seriesPages[sp].title);
+        for (var e = 0; e < list.length; e++) {
+          var episodeKey = extraUrlKey(list[e].url);
+          if (seenEpisodes[episodeKey]) continue;
+          seenEpisodes[episodeKey] = true;
+          list[e].seriesTitle = seriesPages[sp].title;
+          episodes.push(list[e]);
+        }
+      }
+      return Promise.all(episodes.slice(0, 3).map(function (episode) {
+        return fetchTextInfo(episode.url, episode.referer, "").catch(function () { return null; }).then(function (result) {
+          if (!result) return [];
+          var identity = extraPageIdentity(result.html);
+          if (extraEpisodeNumber(identity + " " + result.url) !== episode.request.episode) return [];
+          var titleOk = extraPageTitleMatches(result.html, metadata);
+          if (!titleOk && episode.seriesTitle) titleOk = catalogTitleMatches(identity, [episode.seriesTitle]);
+          if (!titleOk) return [];
+          var playerUrl = qesehPlayerUrl(result.html, result.url);
+          if (!playerUrl) return [];
+          return fetchTextInfo(playerUrl, result.url, "").catch(function () { return null; }).then(function (player) {
+            if (!player) return [];
+            var embeds = qesehEmbedUrls(player.html, player.url);
+            if (!embeds.length) return [];
+            var streams = [], seenStreams = {};
+            return Promise.all(embeds.map(function (embedUrl) {
+              return fetchTextInfo(embedUrl, player.url, "").catch(function () { return null; }).then(function (embed) {
+                if (!embed) return;
+                var entries = mediaEntriesFromHtml(embed.html);
+                return Promise.all(entries.map(function (entry) {
+                  return addMediaEntry(entry, embed.url, "Arab HD", streams, seenStreams);
+                }));
+              });
+            })).then(function () { return streams; });
+          });
+        });
+      })).then(function (parts) {
+        var result = [];
+        for (var i = 0; i < parts.length; i++) result = result.concat(parts[i]);
+        return result;
+      });
+    });
+  });
+}
+
 function resolveQesehSource(metadata, source, requests) {
   var bases = source.bases || [], baseIndex = 0;
   function nextBase() {
@@ -708,6 +823,9 @@ function resolveQesehSource(metadata, source, requests) {
         for (var i = 0; i < parts.length; i++) result = result.concat(parts[i]);
         return result;
       });
+    }).then(function (streams) {
+      if (streams.length) return streams;
+      return qesehCatalogFallback(base, metadata, requests);
     }).then(function (streams) { return streams.length ? streams : nextBase(); });
   }
   return nextBase().then(function (streams) {
