@@ -9,7 +9,7 @@
       "name": "Turkish Sources | مسلسلات تركية",
       "description": "Current and archived Turkish series with recovered Arabic subtitle servers",
       "version": "0.13.0",
-      "filename": "providers/krmizi.js",
+      "filename": "providers/krmizi.js?v=0.13.0",
       "supportedTypes": [
         "tv"
       ],
