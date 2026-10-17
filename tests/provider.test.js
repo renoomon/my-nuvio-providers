@@ -278,6 +278,23 @@ test('Vids host linked by the Shoof player is supported with strict hostname bou
   assert(!ctx.supportedDirectEmbed('https://fakemorencius.com/embed/example'));
 });
 
+test('3ick public player hosts have strict boundaries and passive telemetry is not an interstitial', async()=>{
+  const embed='https://miravd.com/embed-exampleid123.html';
+  const passive='<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>';
+  const {ctx}=runtime((url,opts)=>{
+    if(url===embed)return response('<title>اصطدام الحلقة 1</title>sources:[{file:"'+master+'"}]'+passive,url);
+    if(url===master)return response(playlist,url);
+    return mediaResponse(url,opts);
+  });
+  assert(ctx.supportedDirectEmbed(embed));assert(ctx.supportedDirectEmbed('https://mwdy.cc/embed-exampleid123.html'));
+  assert(!ctx.supportedDirectEmbed('https://fakemiravd.com/embed-exampleid123.html'));
+  assert(!ctx.supportedDirectEmbed('https://mwdy.cc.ad.test/embed-exampleid123.html'));
+  assert.equal(ctx.isChallenge(passive),false);
+  for(const blocked of ['<title>Just a moment...</title>','<form id="cf-chl-widget">verify</form>','<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script>'])assert.equal(ctx.isChallenge(passive+blocked),true);
+  const streams=[];await ctx.resolveEmbedTarget({url:embed,referer:'https://ww4.3ick.club/embed/1/100/2/',label:'Main'},{season:1,episode:1},streams,{});
+  assert.equal(streams.length,2);assert(streams.some(s=>s.quality==='1080p'));
+});
+
 
 test('playback preserves the extraction language header required by AnaFast', () => {
   const {ctx}=runtime(()=>{});

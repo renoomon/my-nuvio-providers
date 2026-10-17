@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.13.0
+ * Version: 0.14.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
@@ -16,7 +16,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.13.0";
+var VERSION = "0.14.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
   { name: "Krmizi", bases: ["https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
@@ -121,7 +121,10 @@ function requestHeaders(referer, origin, accept) {
 }
 
 function isChallenge(html) {
-  var text = String(html || "").toLowerCase();
+  // This passive script also appears on complete public HTTP 200 pages.
+  // The provider reads their HTML; it never executes the injected script.
+  var text = String(html || "").toLowerCase()
+    .replace(/\/cdn-cgi\/challenge-platform\/scripts\/jsd\/main\.js/g, "");
   return text.indexOf("cf-chl-") >= 0 ||
     text.indexOf("challenge-platform") >= 0 ||
     text.indexOf("just a moment") >= 0 ||
@@ -990,7 +993,7 @@ function canonicalEmbedUrl(url) {
 }
 
 function supportedDirectEmbed(url) {
-  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:cdnplus\.(?:space|sbs|org)|mp4plus\.cyou|anafast\.cyou|vidoba\.cyou|vidspeed\.space|larhu\.website|morencius\.com)\//i.test(canonicalEmbedUrl(url));
+  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:cdnplus\.(?:space|sbs|org)|mp4plus\.cyou|anafast\.cyou|vidoba\.cyou|vidspeed\.space|larhu\.website|morencius\.com|miravd\.com|mwdy\.cc)\//i.test(canonicalEmbedUrl(url));
 }
 
 function dailymotionId(url) {
@@ -1306,8 +1309,139 @@ var EXTRA_SOURCES = [
   { name: "DDizi", bases: ["https://www.ddizi.im", "https://www.ddizi.tel"], strategy: "extra", language: "tr", search: "ddizi" },
   { name: "TVDiziler", bases: ["https://tvdiziler.tv"], strategy: "extra", language: "tr", search: "tvajax" },
   { name: "NOW", bases: ["https://www.nowtv.com.tr"], strategy: "extra", official: "now", language: "tr" },
-  { name: "Shahid4U", bases: ["https://sh4u.buzz"], strategy: "extra", search: "php" }
+  { name: "Shahid4U", bases: ["https://sh4u.buzz"], strategy: "extra", search: "php" },
+  { name: "3ick", bases: ["https://ww4.3ick.club", "https://3iskk.xyz"], strategy: "extra", search: "3ick", language: "ar" }
 ];
+
+function threeickCatalogAllowed(url) {
+  return /^https:\/\/ww\d+\.3ick\.club$/i.test(originOf(url));
+}
+
+function threeickOwnedUrl(value, pageUrl) {
+  var url = absUrl(value, pageUrl);
+  if (!url || !threeickCatalogAllowed(url) || !threeickCatalogAllowed(pageUrl)) return "";
+  // The live catalog prints episode links under its next numbered mirror.
+  // Keep only its page-owned path, on the currently reachable catalog mirror.
+  return originOf(pageUrl) + url.substring(originOf(url).length);
+}
+
+function threeickSession() {
+  var cookies = {};
+  function get(url, referer, redirects) {
+    var origin = originOf(url), seed = origin === "https://3iskk.xyz";
+    if (!threeickCatalogAllowed(url) && !seed) return Promise.reject(new Error("3ick_unowned_catalog"));
+    var headers = requestHeaders(referer, "");
+    if (cookies[origin]) headers.Cookie = cookies[origin];
+    var work = fetch(url,{headers:headers,redirect:"manual",skipSizeCheck:true}).then(function(response) {
+      if (!response) throw new Error("3ick_no_response");
+      var location = response.headers && response.headers.get("location");
+      if (response.status >= 300 && response.status < 400 && location) {
+        var next = absUrl(location,url);
+        if (!threeickCatalogAllowed(next) || (redirects || 0) >= 3) throw new Error("3ick_unowned_redirect");
+        return get(next,referer,(redirects || 0) + 1);
+      }
+      var finalUrl = response.url || url;
+      if (!response.ok || !threeickCatalogAllowed(finalUrl)) throw new Error("3ick_http_or_origin");
+      var setCookie = response.headers && response.headers.get("set-cookie");
+      // An ordinary catalog session, never copied to media/player hosts or a
+      // different numbered mirror; missing cookies simply fail the watch page.
+      var match = String(setCookie || "").match(/(?:^|[,;]\s*)PHPSESSID=([A-Za-z0-9,-]{1,128})(?:;|$)/);
+      if (match) cookies[originOf(finalUrl)] = "PHPSESSID=" + match[1];
+      return response.text().then(function(html) {
+        if (isChallenge(html)) throw new Error("3ick_challenge");
+        return {html:String(html || ""),url:finalUrl,status:response.status};
+      });
+    });
+    return withDeadline(work,6000,"3ick_catalog_timeout");
+  }
+  return {get:get};
+}
+
+function threeickTitleMatches(html, metadata) {
+  var $ = cheerio.load(html), heading = $("h1").first().text() || "";
+  if (!heading || /مدبلج|mudblij/i.test(heading)) return false;
+  // This catalog's own suffix is structural branding, not a title alias.
+  heading = heading.replace(/\s+الاصلي\s+(?:HD)?\s*$/i,"");
+  return typeof catalogTitleMatches === "function" && catalogTitleMatches(heading,metadata.titles);
+}
+
+function threeickLinks(page, metadata, requests, verifiedSeries) {
+  var $ = cheerio.load(page.html), series = [], episodes = [], seen = {};
+  $("a[href]").each(function(_,element) {
+    var a = wrap($,element), url = threeickOwnedUrl(a.attr("href"),page.url), identity = extraAnchorIdentity(a);
+    if (!url || seen[url] || /mudblij|مدبلج|اعلان|إعلان|trailer|fragman/i.test(url + " " + identity)) return;
+    if (/\/watch\/tvshows\//i.test(url) && fieldMatchScore(identity,metadata.titles) >= 80) {
+      seen[url] = true; series.push(url); return;
+    }
+    if (!/\/watch\/episodes\/[^/?]+\/?$/i.test(url)) return;
+    var request = extraRequestMatch(identity + " " + url,requests);
+    if (!request || (!verifiedSeries && fieldMatchScore(identity,metadata.titles) < 80)) return;
+    seen[url] = true; episodes.push({url:url,request:request});
+  });
+  return {series:series.slice(0,3),episodes:episodes.slice(0,4)};
+}
+
+function threeickResolveEpisode(candidate, metadata, requests, session, referer) {
+  return session.get(candidate.url,referer).then(function(page) {
+    var request = extraRequestMatch(extraPageIdentity(page.html) + " " + page.url,requests);
+    if (!request || !threeickTitleMatches(page.html,metadata)) return [];
+    var $ = cheerio.load(page.html), watch = "";
+    $("a[href]").each(function(_,element) {
+      var url = threeickOwnedUrl(wrap($,element).attr("href"),page.url);
+      if (/\/see\/$/.test(url) && url.replace(/see\/$/,"") === page.url.replace(/\/?$/,"/")) watch = url;
+    });
+    if (!watch) return [];
+    return session.get(watch,page.url).then(function(player) {
+      if (!/\/see\/$/.test(player.url) || !threeickTitleMatches(player.html,metadata) || !extraRequestMatch(extraPageIdentity(player.html) + " " + player.url,requests)) return [];
+      var $ = cheerio.load(player.html), targets = [], seen = {};
+      function add(url) {if(url && !seen[url]){seen[url]=true;targets.push({url:url,referer:player.url,label:"Arabic"});}}
+      var iframe = threeickOwnedUrl($("#iframe_player").first().attr("src"),player.url);
+      if (!/\/embed\/\d+\/\d+\/2\/$/.test(iframe)) return [];
+      add(iframe);
+      $("#player_servers [data-post][data-nume][data-type]").each(function(_,element) {
+        var item = wrap($,element), post = item.attr("data-post"), num = item.attr("data-nume");
+        if (item.attr("data-type") === "tv" && /^\d+$/.test(post) && /^\d+$/.test(num)) add(originOf(player.url) + "/embed/" + num + "/" + post + "/2/");
+      });
+      return Promise.all(targets.slice(0,4).map(function(target) {
+        return session.get(target.url,target.referer).then(function(wrapper) {
+          var owned = extraOwnedPlayerTargets(wrapper.html,wrapper.url).filter(function(child) {return supportedDirectEmbed(child.url);});
+          return Promise.all(owned.map(function(child) {return extraResolveOwnedPlayer(child,request,0);})).then(function(parts) {
+            var result=[];for(var i=0;i<parts.length;i++)result=result.concat(parts[i]);return result;
+          });
+        }).catch(function(){return [];});
+      })).then(function(parts) {var result=[];for(var i=0;i<parts.length;i++)result=result.concat(parts[i]);return result;});
+    });
+  }).catch(function(error) {logFailure("3ick_episode_failed",errorMessage(error));return [];});
+}
+
+function resolve3ickSource(metadata, source, requests) {
+  var session = threeickSession(), index = 0, seenEpisodes = {};
+  function nextBase() {
+    if (index >= source.bases.length) return Promise.resolve([]);
+    return session.get(source.bases[index++] + "/","").then(function(home) {
+      var titles = typeof catalogSearchTitles === "function" ? catalogSearchTitles(metadata) : metadata.titles;
+      function scan(page, verified) {
+        var links = threeickLinks(page,metadata,requests,verified);
+        var jobs = links.episodes.filter(function(candidate){if(seenEpisodes[candidate.url])return false;seenEpisodes[candidate.url]=true;return true;}).map(function(candidate){return threeickResolveEpisode(candidate,metadata,requests,session,page.url);});
+        if (!verified) jobs = jobs.concat(links.series.map(function(url) {
+          return session.get(url,page.url).then(function(series) {return threeickTitleMatches(series.html,metadata) ? scan(series,true) : [];}).catch(function(){return [];});
+        }));
+        return Promise.all(jobs).then(function(parts) {var result=[];for(var i=0;i<parts.length;i++)result=result.concat(parts[i]);return result;});
+      }
+      return Promise.all(titles.slice(0,6).map(function(title) {
+        return session.get(originOf(home.url) + "/?s=" + encodeURIComponent(title),home.url).then(function(page){return scan(page,false);}).catch(function(){return [];});
+      })).then(function(parts) {var result=[];for(var i=0;i<parts.length;i++)result=result.concat(parts[i]);return result;});
+    }).catch(function(error){logFailure("3ick_catalog_failed",errorMessage(error));return [];}).then(function(streams){return streams.length ? streams : nextBase();});
+  }
+  return nextBase().then(function(streams) {
+    var result=[],seen={};
+    for(var i=0;i<streams.length;i++)if(!seen[streams[i].url]) {
+      seen[streams[i].url]=true;streams[i].name=String(streams[i].name || "Krmizi").replace(/^Krmizi/,"3ick");
+      streams[i].title=String(streams[i].title || "Krmizi").replace(/^Krmizi/,"3ick");streams[i].provider="3ick";streams[i].language="ar";result.push(streams[i]);
+    }
+    return result;
+  });
+}
 
 function extraUrlKey(url) {
   return String(url || "").split("#")[0].replace(/\/+$/, "").toLowerCase();
@@ -1528,6 +1662,7 @@ function extraLastCatalogPage(html, pageUrl, requests) {
 
 function resolveExtraSource(metadata, source, requests) {
   if (source.official === "now") return resolveNowSource(metadata, source, requests);
+  if (source.search === "3ick") return resolve3ickSource(metadata, source, requests);
   var bases = source.bases || [], baseIndex = 0, triedBases = {};
   function nextBase() {
     while (baseIndex < bases.length && triedBases[bases[baseIndex]]) baseIndex++;

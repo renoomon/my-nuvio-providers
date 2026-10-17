@@ -98,3 +98,48 @@ test('DDizi archive discovery reaches episode one through POST search and owned 
  assert(calls.some(([url,opts])=>url===base+'/arama/'&&opts.method==='POST'));
  assert(calls.some(([url])=>url.endsWith('/sayfa-2')));assert(!calls.some(([url])=>url.includes('/?s=')));
 });
+
+test('3ick mirror normalization is limited to its numbered HTTPS catalog hosts',()=>{
+ const c=setup();assert.equal(c.threeickOwnedUrl('https://ww5.3ick.club/watch/episodes/owned/','https://ww4.3ick.club/'),'https://ww4.3ick.club/watch/episodes/owned/');
+ for(const url of ['https://3ick.club.ad.test/watch/episodes/owned/','https://evil.test/watch/episodes/owned/','http://ww5.3ick.club/watch/episodes/owned/'])assert.equal(c.threeickOwnedUrl(url,'https://ww4.3ick.club/'),'');
+});
+test('3ick rejects dubbed cuts and substring titles before resolving a player',()=>{
+ const c=setup();assert.equal(c.threeickTitleMatches('<h1>مسلسل اصطدام مترجم قصة عشق الاصلي HD</h1>',{titles:['اصطدام']}),true);
+ assert.equal(c.threeickTitleMatches('<h1>مسلسل اصطدام مدبلج قصة عشق الاصلي HD</h1>',{titles:['اصطدام']}),false);
+ assert.equal(c.threeickTitleMatches('<h1>مسلسل ولي العهد الحلقة 1 مترجمة قصة عشق الاصلي HD</h1>',{titles:['العهد']}),false);
+});
+test('3ick session cookies stay on the catalog origin and missing cookies are allowed',async()=>{
+ const c=setup(),calls=[],base='https://ww4.3ick.club';
+ c.fetch=async(url,opts)=>{calls.push([url,opts]);return {ok:true,status:200,url,headers:{get:k=>k==='set-cookie'?'PHPSESSID=session123; path=/':null},text:async()=>'<h1>public</h1>'};};
+ const session=c.threeickSession();await session.get(base+'/episode/','');await session.get(base+'/episode/see/',base+'/episode/');await session.get('https://ww5.3ick.club/','');
+ assert.equal(calls[0][1].headers.Cookie,undefined);assert.equal(calls[1][1].headers.Cookie,'PHPSESSID=session123');assert.equal(calls[2][1].headers.Cookie,undefined);
+ await assert.rejects(session.get('https://miravd.com/embed-owned.html',''));assert.equal(calls.length,3);
+ c.fetch=async url=>({ok:true,status:200,url,headers:{get:()=>null},text:async()=>'<h1>public</h1>'});await c.threeickSession().get(base+'/','');
+});
+test('3ick discovers a series, uses its own episode and cookie watch page, and resolves both public servers',async()=>{
+ const c=setup(),base='https://ww4.3ick.club',series=base+'/watch/tvshows/owned/',episode=base+'/watch/episodes/owned-season-1-episode-17/',calls=[];
+ const heading='<h1>مسلسل تحت الارض الحلقة 17 مترجمة قصة عشق الاصلي HD</h1>';
+ c.fetch=async(url,opts)=>{
+  calls.push([url,opts]);let html='',cookie='';
+  if(url===base+'/')html='<form action="/"><input name="s"></form>';
+  else if(url.startsWith(base+'/?s='))html='<a href="/watch/tvshows/dubbed-mudblij/" title="مسلسل تحت الارض مدبلج">مسلسل تحت الارض</a><a href="/watch/tvshows/owned/" title="مسلسل تحت الارض مترجم">مسلسل تحت الارض</a>';
+  else if(url===series)html='<h1>مسلسل تحت الارض مترجم قصة عشق الاصلي HD</h1><a href="https://ww5.3ick.club/watch/episodes/owned-season-1-episode-17/" title="مسلسل تحت الارض الحلقة 17">17</a>';
+  else if(url===episode){html=heading+'<a href="'+episode+'see/">مشاهدة</a>';cookie='PHPSESSID=episode123; path=/';}
+  else if(url===episode+'see/'){assert.equal(opts.headers.Cookie,'PHPSESSID=episode123');html=heading+'<iframe id="iframe_player" src="/embed/1/777/2/"></iframe><ul id="player_servers"><li data-post="777" data-nume="1" data-type="tv"></li><li data-post="777" data-nume="2" data-type="tv"></li></ul>';}
+  else if(url===base+'/embed/1/777/2/')html='<iframe src="https://miravd.com/embed-one.html"></iframe>';
+  else if(url===base+'/embed/2/777/2/')html='<iframe src="https://mwdy.cc/embed-two.html"></iframe>';
+  else throw Error('Unexpected URL '+url);
+  return {ok:true,status:200,url,headers:{get:key=>key==='set-cookie'?cookie:null},text:async()=>html};
+ };
+ c.supportedDirectEmbed=url=>/^https:\/\/(?:miravd\.com|mwdy\.cc)\/embed-/.test(url);
+ c.resolveEmbedTarget=async(target,request,streams)=>{assert.equal(request.season,1);assert.equal(request.episode,17);assert.equal(request.identities.length,2);streams.push({url:target.url+'/media.m3u8',name:'Krmizi',title:'Krmizi',quality:'720p'});};
+ const result=await c.resolveExtraSource(metadata,{name:'3ick',bases:[base],search:'3ick'},[{season:2,episode:1},{season:1,episode:17}]);
+ assert.equal(result.length,2);assert(result.every(s=>s.provider==='3ick'&&s.language==='ar'));assert(!calls.some(([u])=>u.includes('dubbed')||u.startsWith('https://ww5')));
+});
+test('3ick does not invent a player when its watch page redirects after a missing cookie',async()=>{
+ const c=setup(),base='https://ww4.3ick.club',episode=base+'/watch/episodes/owned-season-1-episode-1/';let resolved=0;
+ const heading='<h1>مسلسل اصطدام الحلقة 1 مترجمة قصة عشق الاصلي HD</h1>';
+ const session={get:async(url)=>({url:url.endsWith('/see/')?episode:url,html:heading+'<a href="'+episode+'see/">مشاهدة</a>',status:200})};
+ c.extraResolveOwnedPlayer=async()=>{resolved++;return[];};
+ const result=await c.threeickResolveEpisode({url:episode},{titles:['اصطدام']},[{season:1,episode:1}],session,base+'/');assert.equal(result.length,0);assert.equal(resolved,0);
+});
