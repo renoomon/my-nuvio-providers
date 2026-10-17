@@ -7,6 +7,20 @@ const core=fs.readFileSync(require.resolve('../providers/krmizi.js'),'utf8');
 const fragment=fs.readFileSync(require.resolve('../providers/extra-sources.fragment.js'),'utf8');
 function setup(){const ctx={module:{exports:{}},require:()=>cheerio,console:{log(){}},fetch:()=>Promise.reject(Error('unexpected network'))};vm.createContext(ctx);vm.runInContext(core+'\n'+fragment,ctx);return ctx;}
 const metadata={titles:['تحت الأرض','Yeraltı'],year:2026};
+
+test('only the six Arabic-translated catalogs are registered',()=>{
+ const c=setup();
+ assert.deepEqual(Array.from(c.SOURCES,s=>s.name).sort(),['Krmizi','Qisat','ShoofLive']);
+ assert.deepEqual(Array.from(c.EXTRA_SOURCES,s=>s.name).sort(),['3ick','3skNews','Shahid4U']);
+ const all=c.SOURCES.concat(c.EXTRA_SOURCES);
+ for(const removed of ['NOW','DDizi','TVDiziler']) assert(!all.some(s=>s.name===removed));
+ assert(all.every(s=>String(s.language||'ar')==='ar'));
+});
+test('non-Arabic streams are removed from the provider output',()=>{
+ const c=setup();
+ const kept=c.arabicOnlyStreams([{language:'ar',url:'a'},{language:'AR',url:'b'},{language:'tr',url:'c'},{url:'d'},{language:null,url:'e'}]);
+ assert.deepEqual(Array.from(kept,s=>s.url),['a','b']);
+});
 test('extra catalog selects exact requested episode and rejects trailers and cross origin links',()=>{
  const c=setup(),html='<a href="/episode/18" title="مسلسل تحت الارض الحلقة 18">18</a><a href="/episode/17" title="مسلسل تحت الارض الحلقة 17">17</a><a href="/ad" title="مسلسل تحت الارض الحلقة 18 اعلان">ad</a><a href="https://advert.test/episode/18" title="مسلسل تحت الارض الحلقة 18">18</a>';
  const links=c.extraCatalogLinks(html,'https://catalog.test/',metadata,[{season:1,episode:18}],false);
@@ -44,59 +58,38 @@ test('page-declared no-referrer policy is preserved for Twitter HLS',async()=>{
  const streams=await c.extraResolveOwnedPlayer({url:'https://catalog.test/player/owned',referer:'https://catalog.test/episode/18',label:'Main'},{season:1,episode:18},0);
  assert.equal(received,'');assert.equal(streams.length,1);
 });
-test('NOW uses only full episode links with confirmed flat numbering',()=>{
- const c=setup(),html='<a href="/Yeralti/bolum/18">Yeraltı18.Bölüm</a><a href="/Yeralti/fragman/18-Bolum">Yeraltı18.Bölüm Fragmanı</a><a href="/Yeralti/bolum/1">Yeraltı1.Bölüm</a>';
- assert.equal(c.nowOwnedLinks(html,'https://www.nowtv.com.tr/',metadata,[{season:1,episode:18}]).episodes.length,1);
- assert.equal(c.nowOwnedLinks(html,'https://www.nowtv.com.tr/',metadata,[{season:2,episode:1}]).episodes.length,0);
-});
-
-test('archive searches use each source actual form and preserve Arabic/Turkish aliases',()=>{
+test('archive searches use the source PHP form and preserve Arabic/Turkish aliases',()=>{
  const c=setup(),meta={titles:['Collision','Çarpışma','اصطدام']};
- const dd=c.extraSearchRequests(meta,{search:'ddizi'},'https://www.ddizi.tel',[{season:1,episode:1}]);
- assert(dd.every(r=>r.url==='https://www.ddizi.tel/arama/'&&r.method==='POST'&&r.body.startsWith('arama=')));
- assert(dd.some(r=>decodeURIComponent(r.body).includes('Çarpışma')));assert(dd.some(r=>decodeURIComponent(r.body).includes('اصطدام')));
- const tv=c.extraSearchRequests(meta,{search:'tvajax'},'https://tvdiziler.tv',[{season:1,episode:1}]);
- assert(tv.every(r=>r.url.includes('/search?qr=')&&r.method==='POST'&&r.jsonHtml));
  const sh=c.extraSearchRequests(meta,{search:'php'},'https://sh4u.buzz',[{season:1,episode:1}]);
+ assert(sh.every(r=>r.url.startsWith('https://sh4u.buzz/search.php?keywords=')));
  assert(sh.some(r=>decodeURIComponent(r.url).includes('اصطدام الحلقة 1')));
+ assert(sh.some(r=>decodeURIComponent(r.url).includes('Çarpışma')));
 });
-test('AJAX catalog search extracts HTML from successful JSON only',async()=>{
- const c=setup();let options;
- c.fetch=async(url,opts)=>{options=opts;return{ok:true,status:200,url,text:async()=>JSON.stringify({success:true,data:'<a href="dizi/carpisma">Çarpışma</a>'})};};
- const page=await c.extraFetchCatalog({url:'https://tvdiziler.tv/search?qr=carpisma',method:'POST',body:'',jsonHtml:true},'https://tvdiziler.tv/');
- assert(page.html.includes('Çarpışma'));assert.equal(options.method,'POST');assert.equal(options.headers['X-Requested-With'],'XMLHttpRequest');
+test('generic archive pagination follows owned next and oldest pages',()=>{
+ const c=setup(),url='https://catalog.test/diziler/foo/page/1';
+ const html='<a href="/izle/24" title="Çarpışma 24.Bölüm">24</a><ul class="pagination"><li><a href="/diziler/foo/page/2">2</a></li><li><a href="/diziler/foo/page/3">3</a></li></ul>';
+ assert.equal(c.extraNextCatalogPage(html,url),'https://catalog.test/diziler/foo/page/2');
+ assert.equal(c.extraLastCatalogPage(html,url,[{season:1,episode:1}]),'https://catalog.test/diziler/foo/page/3');
 });
-test('DDizi follows owned zero-based archive pagination and can jump to oldest episodes',()=>{
- const c=setup(),url='https://www.ddizi.tel/diziler/1716/carpisma';
- const html='<a href="/izle/24" title="Çarpışma 24.Bölüm">24</a><a href="/izle/15" title="Çarpışma 15.Bölüm">15</a><ul class="pagination"><li><a href="'+url+'/sayfa-0">1</a></li><li><a href="'+url+'/sayfa-1">2</a></li><li><a href="'+url+'/sayfa-2">3</a></li></ul>';
- assert.equal(c.extraNextCatalogPage(html,url),url+'/sayfa-1');assert.equal(c.extraLastCatalogPage(html,url,[{season:1,episode:1}]),url+'/sayfa-2');
-});
-test('strict owned heading rejects العهد inside ولي العهد even when a secondary title claims otherwise',()=>{
- const c=setup();assert.equal(c.extraPageTitleMatches('<h1>مسلسل ولي العهد الحلقة 1</h1><title>مسلسل العهد الحلقة 1</title>',{titles:['العهد','Söz']}),false);
- assert.equal(c.extraPageTitleMatches('<h1>مسلسل العهد الحلقة 1</h1>',{titles:['العهد','Söz']}),true);
-});
-test('NOW archive navigation follows only archive URLs exposed by its own catalog',()=>{
- const c=setup(),links=c.nowArchiveLinks('<a href="/dizi-arsivi">DİZİ ARŞİVİ</a><a href="/dizi-izle">Diziler</a><a href="https://ad.test/arsiv">Archive</a>','https://www.nowtv.com.tr/');
- assert.equal(links.length,2);assert(links.every(u=>u.startsWith('https://www.nowtv.com.tr/')));
-});
-test('DDizi archive discovery reaches episode one through POST search and owned last page',async()=>{
- const c=setup(),calls=[],base='https://www.ddizi.tel';
- c.fetch=async(url,opts)=>{
-  calls.push([url,opts]);let html='';
-  if(url===base+'/')html='<h1>Latest episodes</h1>';
-  else if(url===base+'/arama/')html=(opts.body.includes(encodeURIComponent('Çarpışma'))?'<a href="/diziler/1716/carpisma" title="Çarpışma izle">Çarpışma</a>':'');
-  else if(url===base+'/diziler/1716/carpisma')html='<a href="/izle/24" title="Çarpışma 24.Bölüm">24</a><ul class="pagination"><li><a href="/diziler/1716/carpisma/sayfa-2">3</a></li></ul>';
-  else if(url===base+'/diziler/1716/carpisma/sayfa-2')html='<a href="/izle/1" title="Çarpışma 1.Bölüm">1</a>';
+test('a verified Arabic catalog series page reaches its own episode player',async()=>{
+ const c=setup(),calls=[],base='https://catalog.test';
+ c.fetch=async(url)=>{
+  calls.push(url);let html='';
+  if(url===base+'/')html='<a href="/dizi/carpisma" title="Çarpışma izle">Çarpışma</a>';
+  else if(url===base+'/dizi/carpisma')html='<h1>Çarpışma</h1><a href="/izle/1" title="Çarpışma 1.Bölüm">1</a>';
   else if(url===base+'/izle/1')html='<h1>Çarpışma 1.Bölüm izle</h1><iframe src="/player/1"></iframe>';
   else if(url===base+'/player/1')html='<meta name="referrer" content="no-referrer"><script>sources:[{file:"https://media.example.test/episode.mp4"}]</script>';
   else throw Error('Unexpected URL '+url);
   return{ok:true,status:200,url,text:async()=>html};
  };
  c.addMediaEntry=async(entry,referer,label,streams)=>streams.push({url:entry.url,name:'Krmizi',title:'Krmizi'});
- const result=await c.resolveExtraSource({titles:['Collision','Çarpışma','اصطدام']},{name:'DDizi',bases:[base],search:'ddizi',language:'tr'},[{season:1,episode:1}]);
- assert.equal(result.length,1);assert.equal(result[0].provider,'DDizi');assert.equal(result[0].language,'tr');
- assert(calls.some(([url,opts])=>url===base+'/arama/'&&opts.method==='POST'));
- assert(calls.some(([url])=>url.endsWith('/sayfa-2')));assert(!calls.some(([url])=>url.includes('/?s=')));
+ const result=await c.resolveExtraSource({titles:['Collision','Çarpışma','اصطدام']},{name:'3skNews',bases:[base],strategy:'extra',language:'ar'},[{season:1,episode:1}]);
+ assert.equal(result.length,1);assert.equal(result[0].provider,'3skNews');assert.equal(result[0].language,'ar');
+ assert(calls.some(url=>url===base+'/izle/1'));
+});
+test('strict owned heading rejects العهد inside ولي العهد even when a secondary title claims otherwise',()=>{
+ const c=setup();assert.equal(c.extraPageTitleMatches('<h1>مسلسل ولي العهد الحلقة 1</h1><title>مسلسل العهد الحلقة 1</title>',{titles:['العهد','Söz']}),false);
+ assert.equal(c.extraPageTitleMatches('<h1>مسلسل العهد الحلقة 1</h1>',{titles:['العهد','Söz']}),true);
 });
 
 test('3ick mirror normalization is limited to its numbered HTTPS catalog hosts',()=>{

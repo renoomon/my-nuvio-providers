@@ -57,7 +57,7 @@ test('extra collectors receive both episode forms from real public season metada
  for(const [requested,absolute]of [[1,17],[17,17],[2,18],[18,18]]){
   const {ctx}=setup(network);ctx.SOURCES=[];ctx.EXTRA_SOURCES=[{name:'Public Catalog',strategy:'extra'}];
   let received;
-  ctx.resolveExtraSource=(_,source,aliases)=>{received=aliases;return Promise.resolve([{name:'Krmizi • Main',title:'Krmizi',url:'https://media.test/'+absolute+'.mp4'}]);};
+  ctx.resolveExtraSource=(_,source,aliases)=>{received=aliases;return Promise.resolve([{name:'Krmizi • Main',title:'Krmizi',url:'https://media.test/'+absolute+'.mp4',language:'ar'}]);};
   const streams=await ctx.module.exports.getStreams('309328','tv',2,requested);
   assert.equal(streams.length,1);
   assert(received.some(item=>item.season===1&&item.episode===absolute));

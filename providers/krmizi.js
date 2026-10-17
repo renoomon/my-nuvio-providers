@@ -1,12 +1,14 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.14.0
+ * Version: 0.15.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
  * series page -> exact episode inside that page -> page-owned player ->
  * AlbaPlayer servers for that episode only -> public HLS/MP4 sources.
  * Search Krmizi, ShoofLive and Qisat independently; combine every source result.
+ * Arabic translation is required: only Arabic-tagged streams are returned, and
+ * the original-Turkish catalogs NOW, DDizi and TVDiziler are not registered.
  *
  * The provider never crawls related posts or arbitrary page links. It uses
  * Promise chains and the modules exposed by Nuvio's QuickJS/Hermes runtime.
@@ -16,7 +18,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.14.0";
+var VERSION = "0.15.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
   { name: "Krmizi", bases: ["https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
@@ -444,7 +446,7 @@ function catalogTitleMatches(value, titles) {
     .replace(/(?:الحلقه|حلقه)\s+(?:رقم\s+)?\d{1,4}(?:\s+(?:و?الاخيره|الاولي))?/g, " ")
     .replace(/\b(?:season|episode|ep)\s*\d{1,4}\b/g, " ")
     .replace(/\b\d{1,4}\s*bolum\b|\bbolum\s*\d{1,4}\b/g, " ")
-    .replace(/\b(?:full|tek|parca|izle|final|finali|finale|hd\d?|hq|online|series|tv|show|ddizi|tvdiziler|shahid4u)\b/g, " ")
+    .replace(/\b(?:full|tek|parca|izle|final|finali|finale|hd\d?|hq|online|series|tv|show|shahid4u)\b/g, " ")
     .replace(/(?:^|\s)(?:مسلسل|المسلسل|مشاهده|تحميل|مترجم|مترجمه|مدبلج|مدبلجه|كامل|كامله|الحلقات|جميع|اونلاين|قرمزي|شوف لايف|شاهد فور يو|قصه عشق|الاخيره|والاخيره)(?=\s|$)/g, " ")
     .replace(/\s+/g, " ").trim();
   return !text;
@@ -1299,17 +1301,26 @@ function sortStreams(streams) {
   });
 }
 
+function arabicOnlyStreams(streams) {
+  // Arabic translation is a hard requirement for this provider. Original
+  // Turkish catalogs are not registered; this guard also keeps a future
+  // non-Arabic stream from reaching Nuvio.
+  return (streams || []).filter(function (stream) {
+    return String(stream && stream.language || "").toLowerCase() === "ar";
+  });
+}
+
 // BEGIN EXTRA SOURCE ADAPTERS
 /* Additional catalog adapters. Concatenate into krmizi.js: no extra runtime require.
  * These are separately searched catalogs, not a claim of independent ownership.
  * A source contributes only episode-owned, identity-checked, validated media.
  */
+// Arabic-translated catalogs only. Original-Turkish catalogs (NOW, DDizi,
+// TVDiziler) were removed in 0.15.0 because they cannot provide Arabic
+// translation; this provider returns Arabic-tagged streams only.
 var EXTRA_SOURCES = [
-  { name: "3skNews", bases: ["https://q.3sk.news", "https://f1.q3sk.monster"], strategy: "extra" },
-  { name: "DDizi", bases: ["https://www.ddizi.im", "https://www.ddizi.tel"], strategy: "extra", language: "tr", search: "ddizi" },
-  { name: "TVDiziler", bases: ["https://tvdiziler.tv"], strategy: "extra", language: "tr", search: "tvajax" },
-  { name: "NOW", bases: ["https://www.nowtv.com.tr"], strategy: "extra", official: "now", language: "tr" },
-  { name: "Shahid4U", bases: ["https://sh4u.buzz"], strategy: "extra", search: "php" },
+  { name: "3skNews", bases: ["https://q.3sk.news", "https://f1.q3sk.monster"], strategy: "extra", language: "ar" },
+  { name: "Shahid4U", bases: ["https://sh4u.buzz"], strategy: "extra", search: "php", language: "ar" },
   { name: "3ick", bases: ["https://ww4.3ick.club", "https://3iskk.xyz"], strategy: "extra", search: "3ick", language: "ar" }
 ];
 
@@ -1603,25 +1614,18 @@ function extraSearchRequests(metadata, source, base, requests) {
     add(titles[i]);
   }
   return queries.slice(0, 8).map(function (title) {
-    if (source.search === "ddizi") return {url:base + "/arama/",method:"POST",body:"arama=" + encodeURIComponent(title)};
-    if (source.search === "tvajax") return {url:base + "/search?qr=" + encodeURIComponent(title),method:"POST",body:"",jsonHtml:true};
     return {url:base + (source.search === "php" ? "/search.php?keywords=" : "/?s=") + encodeURIComponent(title)};
   });
 }
 
 function extraFetchCatalog(request, referer) {
   if (!request.method || request.method === "GET") return fetchTextInfo(request.url, referer, "");
-  var headers = requestHeaders(referer, originOf(referer), request.jsonHtml ? "application/json,text/plain,*/*" : "text/html,*/*");
+  var headers = requestHeaders(referer, originOf(referer), "text/html,*/*");
   headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
-  if (request.jsonHtml) headers["X-Requested-With"] = "XMLHttpRequest";
   var job = fetch(request.url,{method:request.method,headers:headers,body:request.body,skipSizeCheck:true}).then(function (response) {
     if (!response || !response.ok) throw new Error("http_" + (response ? response.status : "no_response"));
     return response.text().then(function (body) {
       if (isChallenge(body)) throw new Error("cloudflare_challenge");
-      if (request.jsonHtml) {
-        try { var data = JSON.parse(body); body = data.success && typeof data.data === "string" ? data.data : ""; }
-        catch (_) { body = ""; }
-      }
       return {html:String(body || ""),url:response.url || request.url,status:response.status};
     });
   });
@@ -1631,12 +1635,10 @@ function extraFetchCatalog(request, referer) {
 function extraNextCatalogPage(html, pageUrl) {
   var $ = cheerio.load(html), current = String(pageUrl).match(/(?:[?&](?:page|paged)=|\/page\/)(\d+)/i);
   var currentNumber = current ? parseInt(current[1],10) : 1, next = "";
-  var ddizi = /\/sayfa-\d+/i.test(html), ddCurrent = String(pageUrl).match(/\/sayfa-(\d+)/i);
-  if (ddizi) currentNumber = ddCurrent ? parseInt(ddCurrent[1],10) : 0;
   $("a[rel=next], .pagination a[href], .wp-pagenavi a[href], .page-numbers[href]").each(function (_,element) {
     var a = wrap($,element), url = absUrl(a.attr("href"),pageUrl);
     if (originOf(url) !== originOf(pageUrl)) return;
-    var number = url.match(ddizi ? /\/sayfa-(\d+)/i : /(?:[?&](?:page|paged)=|\/page\/)(\d+)/i);
+    var number = url.match(/(?:[?&](?:page|paged)=|\/page\/)(\d+)/i);
     if (number && parseInt(number[1],10) === currentNumber + 1) next = url;
   });
   return next;
@@ -1654,14 +1656,13 @@ function extraLastCatalogPage(html, pageUrl, requests) {
   });
   if (!(minimum > target && minimum < Infinity)) return "";
   $(".pagination a[href], .wp-pagenavi a[href], .page-numbers[href]").each(function (_,element) {
-    var url = absUrl(wrap($,element).attr("href"),pageUrl), number = url.match(/(?:[?&](?:page|paged)=|\/page\/|\/sayfa-)(\d+)/i);
+    var url = absUrl(wrap($,element).attr("href"),pageUrl), number = url.match(/(?:[?&](?:page|paged)=|\/page\/)(\d+)/i);
     if (originOf(url) === originOf(pageUrl) && number && parseInt(number[1],10) > highest) {highest=parseInt(number[1],10);last=url;}
   });
   return last;
 }
 
 function resolveExtraSource(metadata, source, requests) {
-  if (source.official === "now") return resolveNowSource(metadata, source, requests);
   if (source.search === "3ick") return resolve3ickSource(metadata, source, requests);
   var bases = source.bases || [], baseIndex = 0, triedBases = {};
   function nextBase() {
@@ -1735,102 +1736,6 @@ function resolveExtraSource(metadata, source, requests) {
     return deduped;
   });
 }
-
-
-// NOW exposes full public episodes through its own page's documented AJAX call.
-// Request the page-discovered video ID only; trailers and snippets are excluded.
-function nowOwnedLinks(html, pageUrl, metadata, requests) {
-  var $ = cheerio.load(html), series = [], episodes = [], seen = {};
-  $("a[href]").each(function (_, element) {
-    var a = wrap($, element), url = absUrl(a.attr("href"), pageUrl);
-    if (originOf(url) !== "https://www.nowtv.com.tr" || seen[extraUrlKey(url)]) return;
-    var path = url.split("?")[0], identity = extraAnchorIdentity(a) + " " + path;
-    if (fieldMatchScore(identity, metadata.titles) < 80) return;
-    var match = path.match(/\/bolum\/(\d+)\/?$/i);
-    if (match) {
-      for (var r = 0; r < requests.length; r++) {
-        if (requests[r].season === 1 && requests[r].episode === parseInt(match[1], 10)) {
-          episodes.push({ url: url, request: requests[r] }); seen[extraUrlKey(url)] = true; break;
-        }
-      }
-    } else if (/\/[^/]+\/izle\/?$/i.test(path) || /^https:\/\/www\.nowtv\.com\.tr\/[^/?]+\/?$/i.test(path)) {
-      series.push(url); seen[extraUrlKey(url)] = true;
-    }
-  });
-  return { series: series.slice(0, 2), episodes: episodes.slice(0, 2) };
-}
-
-function nowResolveEpisode(candidate, metadata) {
-  return fetchTextInfo(candidate.url, "https://www.nowtv.com.tr/", "").then(function (page) {
-    var identity = extraPageIdentity(page.html);
-    if (!extraPageTitleMatches(page.html, metadata) || extraEpisodeNumber(identity) !== candidate.request.episode) return [];
-    var $ = cheerio.load(page.html);
-    var id = $(".vod-player[data-video-id]").first().attr("data-video-id");
-    if (!/^\d+$/.test(String(id || ""))) return [];
-    var headers = requestHeaders(page.url, "https://www.nowtv.com.tr", "application/json,text/plain,*/*");
-    headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
-    headers["X-Requested-With"] = "XMLHttpRequest";
-    return fetch("https://www.nowtv.com.tr/ajax/stream", {
-      method: "POST", headers: headers, body: "video_id=" + encodeURIComponent(id), skipSizeCheck: true
-    }).then(function (response) {
-      if (!response || !response.ok) return null;
-      return response.text().then(function (text) {
-        if (isChallenge(text)) return null;
-        try { return JSON.parse(text); } catch (_) { return null; }
-      });
-    }).then(function (data) {
-      if (!data || data.code !== 200 || !directMedia(data.video_url)) return [];
-      var streams = [];
-      return addMediaEntry({url:data.video_url,quality:""}, page.url, "Official • Türkçe", streams, {}).then(function () {
-        for (var i = 0; i < streams.length; i++) {
-          streams[i].name = String(streams[i].name || "Krmizi").replace(/^Krmizi/, "NOW");
-          streams[i].title = String(streams[i].title || "Krmizi").replace(/^Krmizi/, "NOW");
-          streams[i].provider = "NOW"; streams[i].language = "tr";
-        }
-        return streams;
-      });
-    });
-  }).catch(function (error) { logFailure("official_episode_failed", "NOW " + errorMessage(error)); return []; });
-}
-
-function nowArchiveLinks(html, pageUrl) {
-  var $ = cheerio.load(html), links = [], seen = {};
-  $("a[href]").each(function (_,element) {
-    var url = absUrl(wrap($,element).attr("href"),pageUrl);
-    if (originOf(url) !== "https://www.nowtv.com.tr" || !/\/(?:dizi-izle|dizi-arsivi|arsiv)\/?$/i.test(url) || seen[url]) return;
-    seen[url]=true;links.push(url);
-  });
-  return links.slice(0,3);
-}
-
-function resolveNowSource(metadata, source, requests) {
-  function resolveCatalog(page) {
-    var links = nowOwnedLinks(page.html,page.url,metadata,requests);
-    var jobs = links.episodes.map(function (candidate) {return nowResolveEpisode(candidate,metadata);});
-    var seriesJobs = (links.episodes.length ? [] : links.series).map(function (url) {
-      return fetchTextInfo(url,page.url,"").then(function (series) {
-        if (!extraPageTitleMatches(series.html,metadata)) return [];
-        var own = nowOwnedLinks(series.html,series.url,metadata,requests);
-        return Promise.all(own.episodes.map(function (candidate) {return nowResolveEpisode(candidate,metadata);})).then(function (parts) {
-          var result=[];for(var i=0;i<parts.length;i++)result=result.concat(parts[i]);return result;
-        });
-      }).catch(function(){return [];});
-    });
-    return Promise.all(jobs.concat(seriesJobs)).then(function(parts){
-      var result=[],seen={};
-      for(var i=0;i<parts.length;i++)for(var p=0;p<parts[i].length;p++)if(!seen[parts[i][p].url]){seen[parts[i][p].url]=true;result.push(parts[i][p]);}
-      return result;
-    });
-  }
-  return fetchTextInfo("https://www.nowtv.com.tr/","","").then(function(home){
-    return resolveCatalog(home).then(function(streams){
-      if(streams.length)return streams;
-      return Promise.all(nowArchiveLinks(home.html,home.url).map(function(url){
-        return fetchTextInfo(url,home.url,"").then(resolveCatalog).catch(function(){return [];});
-      })).then(function(parts){var result=[];for(var i=0;i<parts.length;i++)result=result.concat(parts[i]);return result;});
-    });
-  }).catch(function(error){logFailure("official_source_failed","NOW "+errorMessage(error));return [];});
-}
 // END EXTRA SOURCE ADAPTERS
 
 function getStreams(tmdbId, mediaType, season, episode) {
@@ -1856,7 +1761,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     var jobs = sources.map(function (source) {
       log("source", source.name);
       var work = Promise.resolve().then(function () {
-        if (source.strategy === "extra" || source.strategy === "now") {
+        if (source.strategy === "extra") {
           var requests = siteEpisodeRequests({ html: "", heading: "" }, metadata, wantedSeason, wantedEpisode);
           if (!requests.length) requests = [{ season: wantedSeason, episode: wantedEpisode }];
           var aliases = [], seen = {};
@@ -1905,6 +1810,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     // host execution limit. Each source already has its own shorter deadline.
     return sortStreams(collected);
   }).then(function (streams) {
+    streams = arabicOnlyStreams(streams);
     log("streams_found", streams.length);
     return streams;
   });

@@ -75,13 +75,13 @@ test('both numbering systems traverse metadata, series discovery, page verificat
 
 test('declared extra collectors and base sources contribute together with numbering aliases and source names',async()=>{
   const {ctx,timers}=runtime(network);ctx.SOURCES=[source];ctx.getTmdbMetadata=()=>Promise.resolve(metadata);
-  ctx.EXTRA_SOURCES=[{name:'Extra Catalog',strategy:'extra'},{name:'Official Catalog',strategy:'now'}];
+  ctx.EXTRA_SOURCES=[{name:'Extra Catalog',strategy:'extra'},{name:'Official Catalog',strategy:'extra'}];
   const started=[];
   ctx.resolveExtraSource=(data,extra,aliases)=>{
     assert.equal(data.year,2026);started.push(extra.name);
     assert(aliases.some(request=>request.season===1&&request.episode===17));
     assert(aliases.some(request=>request.season===2&&request.episode===1));
-    return Promise.resolve([{name:'Krmizi • Main',title:'Krmizi 1080p',url:'https://extra.test/'+encodeURIComponent(extra.name)+'.mp4',quality:'1080p'}]);
+    return Promise.resolve([{name:'Krmizi • Main',title:'Krmizi 1080p',url:'https://extra.test/'+encodeURIComponent(extra.name)+'.mp4',quality:'1080p',language:'ar'}]);
   };
   const streams=await ctx.module.exports.getStreams('123','tv',2,17);
   assert.equal(streams.length,3);assert.deepEqual(started,['Extra Catalog','Official Catalog']);
@@ -94,7 +94,19 @@ test('declared extra collectors and base sources contribute together with number
 test('a failed extra collector cannot discard a successful base source or another collector',async()=>{
   const {ctx}=runtime(network);ctx.SOURCES=[source];ctx.getTmdbMetadata=()=>Promise.resolve(metadata);
   ctx.EXTRA_SOURCES=[{name:'Broken',strategy:'extra'},{name:'Working Extra',strategy:'extra'}];
-  ctx.resolveExtraSource=(_,extra)=>extra.name==='Broken'?Promise.reject(Error('upstream failed')):Promise.resolve([{name:'Krmizi • Main',title:'Krmizi',url:'https://extra.test/good.mp4'}]);
+  ctx.resolveExtraSource=(_,extra)=>extra.name==='Broken'?Promise.reject(Error('upstream failed')):Promise.resolve([{name:'Krmizi • Main',title:'Krmizi',url:'https://extra.test/good.mp4',language:'ar'}]);
   const streams=await ctx.module.exports.getStreams('123','tv',2,1);
   assert.equal(streams.length,2);assert.deepEqual(Array.from(streams,stream=>stream.provider).sort(),['ShoofLive','Working Extra']);
+});
+
+test('getStreams returns Arabic streams only',async()=>{
+  const {ctx}=runtime(network);ctx.SOURCES=[];ctx.getTmdbMetadata=()=>Promise.resolve(metadata);
+  ctx.EXTRA_SOURCES=[{name:'Arabic Only',strategy:'extra'}];
+  ctx.resolveExtraSource=()=>Promise.resolve([
+    {name:'Krmizi • A',title:'Krmizi • A',url:'https://extra.test/ar.mp4',language:'ar'},
+    {name:'Krmizi • B',title:'Krmizi • B',url:'https://extra.test/tr.mp4',language:'tr'},
+    {name:'Krmizi • C',title:'Krmizi • C',url:'https://extra.test/unknown.mp4'}
+  ]);
+  const streams=await ctx.module.exports.getStreams('123','tv',1,1);
+  assert.equal(streams.length,1);assert.equal(streams[0].url,'https://extra.test/ar.mp4');assert.equal(streams[0].language,'ar');
 });
