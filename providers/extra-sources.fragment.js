@@ -8,6 +8,9 @@
 var EXTRA_SOURCES = [
   { name: "3skNews", bases: ["https://q.3sk.news", "https://f1.q3sk.monster"], strategy: "extra", language: "ar" },
   { name: "Qeseh", bases: ["https://wwv.qeseh.com"], strategy: "extra", search: "qeseh", language: "ar" },
+  { name: "Qesset", bases: ["https://qesset.com", "https://www.qesset.com"], strategy: "extra", search: "qeseh", language: "ar" },
+  { name: "FaselHD", bases: ["https://faselhd.watch", "https://faselhd.channel"], strategy: "extra", search: "faselhd", language: "ar" },
+  { name: "Dailymotion", bases: ["https://www.dailymotion.com"], strategy: "extra", search: "dailymotion", language: "ar" },
   { name: "Shahid4U", bases: ["https://sh4u.buzz"], strategy: "extra", search: "php", language: "ar" },
   { name: "3ick", bases: ["https://ww4.3ick.club", "https://3iskk.xyz"], strategy: "extra", search: "3ick", language: "ar" }
 ];
@@ -857,9 +860,336 @@ function resolveQesehSource(metadata, source, requests) {
   });
 }
 
+
+function faselhdEpisodeNumber(url, identity) {
+  var decoded = String(url || "");
+  try { decoded = decodeURIComponent(decoded); } catch (_) {}
+  var match = decoded.match(/الحلقة[\s\-_]*(\d{1,4})/i) || decoded.match(/الحلقه[\s\-_]*(\d{1,4})/i);
+  if (match) return parseInt(match[1], 10);
+  match = String(identity || "").match(/^\s*(\d{1,4})\b/);
+  return match ? parseInt(match[1], 10) : NaN;
+}
+
+function faselhdSeriesLinks(html, pageUrl, metadata) {
+  var $ = cheerio.load(html), links = [], seen = {};
+  $("a[href]").each(function (_, element) {
+    var a = wrap($, element), url = absUrl(a.attr("href"), pageUrl);
+    if (!url || originOf(url) !== originOf(pageUrl) || !/\/series\//i.test(url)) return;
+    var identity = extraAnchorIdentity(a);
+    if (fieldMatchScore(identity, metadata.titles) < 80 &&
+        !(typeof catalogTitleMatches === "function" && catalogTitleMatches(identity, metadata.titles))) return;
+    var key = extraUrlKey(url);
+    if (seen[key]) return;
+    seen[key] = true;
+    links.push({ url: url, identity: identity.replace(/\s+/g, " ").trim() });
+  });
+  return links.slice(0, 4);
+}
+
+function faselhdEpisodeLinks(html, pageUrl, requests) {
+  var $ = cheerio.load(html), episodes = [], seen = {};
+  $("a[href]").each(function (_, element) {
+    var a = wrap($, element), url = absUrl(a.attr("href"), pageUrl);
+    if (!url || originOf(url) !== originOf(pageUrl) || !/\/episode\//i.test(url)) return;
+    var identity = extraAnchorIdentity(a);
+    var number = faselhdEpisodeNumber(url, identity);
+    if (!number) return;
+    var request = null;
+    for (var r = 0; r < requests.length; r++) {
+      if (requests[r].episode === number) {
+        request = { season: requests[r].season, episode: number, identities: requests[r].identities || requests };
+        break;
+      }
+    }
+    if (!request) return;
+    var explicit = explicitSeasonEpisode(identity + " " + url);
+    if (explicit && explicit.season !== request.season) return;
+    var key = extraUrlKey(url);
+    if (seen[key]) return;
+    seen[key] = true;
+    episodes.push({ url: url, request: request, referer: pageUrl });
+  });
+  return episodes.slice(0, 3);
+}
+
+function faselhdPlayerTargets(html, pageUrl) {
+  var $ = cheerio.load(html), targets = [], seen = {};
+  function add(value) {
+    var url = absUrl(value, pageUrl);
+    if (!url || seen[url]) return;
+    if (!supportedDirectEmbed(url) && !directMedia(url) && !anaPlayerAllowed(url) && !dailymotionId(url)) return;
+    seen[url] = true;
+    targets.push(url);
+  }
+  $("iframe[src], iframe[data-src]").each(function (_, element) {
+    var frame = wrap($, element);
+    add(frame.attr("src") || frame.attr("data-src"));
+  });
+  $("video[src], video source[src]").each(function (_, element) {
+    add(wrap($, element).attr("src"));
+  });
+  return targets.slice(0, 4);
+}
+
+// FaselHD exposes a small modern Turkish catalog (search is server-side broken),
+// so the resolver walks the site's own paginated category and then the series
+// episode list. Playback iframes are cdnplus/mp4plus, already supported.
+function resolveFaselhdSource(metadata, source, requests) {
+  var bases = source.bases || [], baseIndex = 0;
+  function nextBase() {
+    if (baseIndex >= bases.length) return Promise.resolve([]);
+    var base = bases[baseIndex++];
+    var catalogUrls = [
+      base + "/?fho_cat=turkish-series",
+      base + "/?fho_cat=turkish-series&fho_page=2",
+      base + "/?fho_cat=turkish-series&fho_page=3"
+    ];
+    return Promise.all(catalogUrls.map(function (url) {
+      return fetchTextInfo(url, base + "/", "").catch(function () { return null; });
+    })).then(function (pages) {
+      var series = [], seen = {};
+      for (var p = 0; p < pages.length; p++) {
+        if (!pages[p]) continue;
+        var links = faselhdSeriesLinks(pages[p].html, pages[p].url, metadata);
+        for (var i = 0; i < links.length; i++) {
+          var key = extraUrlKey(links[i].url);
+          if (seen[key]) continue;
+          seen[key] = true;
+          series.push(links[i]);
+        }
+      }
+      return Promise.all(series.slice(0, 3).map(function (entry) {
+        return fetchTextInfo(entry.url, base + "/", "").catch(function () { return null; }).then(function (page) {
+          if (!page) return [];
+          var identity = extraPageIdentity(page.html);
+          if (!extraPageTitleMatches(page.html, metadata) &&
+              !(typeof catalogTitleMatches === "function" && catalogTitleMatches(identity, metadata.titles))) return [];
+          var episodes = faselhdEpisodeLinks(page.html, page.url, requests);
+          return Promise.all(episodes.slice(0, 2).map(function (episode) {
+            return fetchTextInfo(episode.url, page.url, "").catch(function () { return null; }).then(function (episodePage) {
+              if (!episodePage) return [];
+              var episodeIdentity = extraPageIdentity(episodePage.html);
+              if (extraEpisodeNumber(episodeIdentity + " " + episodePage.url) !== episode.request.episode) return [];
+              var targets = faselhdPlayerTargets(episodePage.html, episodePage.url);
+              var streams = [], seenStreams = {};
+              return Promise.all(targets.map(function (target) {
+                return resolveEmbedTarget({ url: target, referer: episodePage.url, label: "Main" }, episode.request, streams, seenStreams);
+              })).then(function () { return streams; });
+            });
+          })).then(function (parts) {
+            var result = [];
+            for (var i = 0; i < parts.length; i++) result = result.concat(parts[i]);
+            return result;
+          });
+        });
+      })).then(function (parts) {
+        var result = [];
+        for (var i = 0; i < parts.length; i++) result = result.concat(parts[i]);
+        return result;
+      });
+    }).then(function (streams) { return streams.length ? streams : nextBase(); });
+  }
+  return nextBase().then(function (streams) {
+    var result = [], seen = {};
+    for (var i = 0; i < streams.length; i++) {
+      if (seen[streams[i].url]) continue;
+      seen[streams[i].url] = true;
+      streams[i].name = String(streams[i].name || "Krmizi").replace(/^Krmizi/, source.name);
+      streams[i].title = String(streams[i].title || "Krmizi").replace(/^Krmizi/, source.name);
+      streams[i].provider = source.name;
+      streams[i].language = "ar";
+      result.push(streams[i]);
+    }
+    return result;
+  });
+}
+
+
+// Dailymotion's public search API needs no key and the player metadata exposes
+// the real HLS variants (up to 4K). Arabic-subtitled Turkish episodes are
+// matched by the video title itself, so no catalog markup is involved.
+function dailymotionSearchQuery(title, episode) {
+  var clean = String(title || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  if (/[\u0600-\u06ff]/.test(clean)) return clean + " الحلقة " + episode + " مترجم";
+  return clean + " episode " + episode + " arabic sub";
+}
+
+function dailymotionVideoId(url) {
+  var match = String(url || "").match(/dailymotion\.com\/video\/([A-Za-z0-9]+)/i);
+  return match ? match[1] : "";
+}
+
+function resolveDailymotionSource(metadata, source, requests) {
+  var titles = extraQueryTitles(metadata).slice(0, 6);
+  var queries = [], seenQuery = {};
+  for (var r = 0; r < requests.length; r++) {
+    for (var t = 0; t < titles.length; t++) {
+      var query = dailymotionSearchQuery(titles[t], requests[r].episode);
+      if (!query || seenQuery[query]) continue;
+      seenQuery[query] = true;
+      queries.push({ query: query, request: requests[r] });
+      if (queries.length >= 6) break;
+    }
+    if (queries.length >= 6) break;
+  }
+  if (!queries.length) return Promise.resolve([]);
+  return Promise.all(queries.map(function (entry) {
+    var url = "https://api.dailymotion.com/videos?search=" + encodeURIComponent(entry.query) +
+      "&limit=20&sort=relevance&fields=id,title,duration,url";
+    return fetchJson(url, "https://www.dailymotion.com/", "https://www.dailymotion.com")
+      .catch(function () { return null; })
+      .then(function (data) { return { videos: data && data.list || [], request: entry.request }; });
+  })).then(function (groups) {
+    var candidates = [], seen = {};
+    for (var g = 0; g < groups.length; g++) {
+      var videos = groups[g].videos, request = groups[g].request;
+      for (var v = 0; v < videos.length; v++) {
+        var video = videos[v];
+        if (!video || !video.id || seen[video.id]) continue;
+        var title = String(video.title || "");
+        if (!title) continue;
+        if (fieldMatchScore(title, metadata.titles) < 80 && !catalogTitleMatches(title, metadata.titles)) continue;
+        if (/مدبلج|dublaj|dubbed/i.test(title)) continue;
+        var explicit = explicitSeasonEpisode(title);
+        if (explicit && explicit.season !== request.season) continue;
+        var number = extraEpisodeNumber(title);
+        if (number !== request.episode) continue;
+        seen[video.id] = true;
+        candidates.push({ id: video.id, title: title, request: request });
+      }
+    }
+    candidates = candidates.slice(0, 3);
+    var streams = [], seenStreams = {};
+    return Promise.all(candidates.map(function (candidate) {
+      var url = "https://www.dailymotion.com/video/" + candidate.id;
+      return resolveDailymotion(url, "https://www.dailymotion.com/", "Main", streams, seenStreams).catch(function () {});
+    })).then(function () { return streams; });
+  }).then(function (streams) {
+    var result = [], seen = {};
+    for (var i = 0; i < streams.length; i++) {
+      if (seen[streams[i].url]) continue;
+      seen[streams[i].url] = true;
+      streams[i].name = String(streams[i].name || "Krmizi").replace(/^Krmizi/, source.name);
+      streams[i].title = String(streams[i].title || "Krmizi").replace(/^Krmizi/, source.name);
+      streams[i].provider = source.name;
+      streams[i].language = "ar";
+      result.push(streams[i]);
+    }
+    return result;
+  }).catch(function () { return []; });
+}
+
+
+function okruHtmlDecode(value) {
+  return String(value || "")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#0*34;/gi, "\"")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#0*39;|&apos;/gi, "'");
+}
+
+function okruEpisodeNumber(title) {
+  var number = extraEpisodeNumber(title);
+  if (number) return number;
+  var match = String(title || "").match(/(\d{1,3})\s*[-–—]\s*(\d{1,3})\b/);
+  if (match) return parseInt(match[2], 10);
+  match = String(title || "").match(/(?:^|\s)(\d{1,3})\s*(?:\.|$)/);
+  return match ? parseInt(match[1], 10) : NaN;
+}
+
+function okruMediaUrl(html) {
+  var decoded = okruHtmlDecode(html);
+  var match = decoded.match(/"hlsManifestUrl":"(https?:\/\/[^"]+)"/);
+  var url = match ? match[1] : "";
+  if (!url) match = decoded.match(/"metadataMp4Url":"(https?:\/\/[^"]+)"/);
+  if (!url && match) url = match[1];
+  return url ? url.replace(/\\u0026/gi, "&").replace(/\\\//g, "/") : "";
+}
+
+function resolveOkruSource(metadata, source, requests) {
+  var titles = extraQueryTitles(metadata).slice(0, 5);
+  var queries = [], seenQuery = {};
+  for (var r = 0; r < requests.length && queries.length < 4; r++) {
+    for (var t = 0; t < titles.length && queries.length < 4; t++) {
+      var title = String(titles[t] || "").trim();
+      if (!title) continue;
+      var query = /[\u0600-\u06ff]/.test(title) ? title + " الحلقة " + requests[r].episode + " مترجم" : title + " " + requests[r].episode + " arabic";
+      if (seenQuery[query]) continue;
+      seenQuery[query] = true;
+      queries.push({ query: query, request: requests[r] });
+    }
+  }
+  if (!queries.length) return Promise.resolve([]);
+  return Promise.all(queries.map(function (entry) {
+    var url = "https://ok.ru/video/search?st.v.sq=" + encodeURIComponent(entry.query);
+    return fetchTextInfo(url, "https://ok.ru/", "").catch(function () { return null; }).then(function (page) {
+      if (!page) return { ids: [], request: entry.request };
+      var ids = [], seen = {};
+      var re = /\/video\/(\d{8,})/g, match;
+      while ((match = re.exec(page.html)) !== null && ids.length < 6) {
+        if (seen[match[1]]) continue;
+        seen[match[1]] = true;
+        ids.push(match[1]);
+      }
+      return { ids: ids, request: entry.request };
+    });
+  })).then(function (groups) {
+    var candidates = [], seenIds = {};
+    for (var g = 0; g < groups.length; g++) {
+      for (var i = 0; i < groups[g].ids.length && candidates.length < 6; i++) {
+        var id = groups[g].ids[i];
+        if (seenIds[id]) continue;
+        seenIds[id] = true;
+        candidates.push({ id: id, request: groups[g].request });
+      }
+    }
+    return Promise.all(candidates.slice(0, 6).map(function (candidate) {
+      var pageUrl = "https://ok.ru/video/" + candidate.id;
+      return fetchTextInfo(pageUrl, "https://ok.ru/", "").catch(function () { return null; }).then(function (page) {
+        if (!page) return [];
+        var title = (page.html.match(/<title>([\s\S]*?)<\/title>/i) || [])[1] || "";
+        title = okruHtmlDecode(title).replace(/\s+/g, " ").trim();
+        if (!title) return [];
+        if (fieldMatchScore(title, metadata.titles) < 80 && !catalogTitleMatches(title, metadata.titles)) return [];
+        if (/مدبلج|dublaj|dubbed/i.test(title)) return [];
+        var explicit = explicitSeasonEpisode(title);
+        if (explicit && explicit.season !== candidate.request.season) return [];
+        var number = okruEpisodeNumber(title);
+        if (number !== candidate.request.episode) return [];
+        var mediaUrl = okruMediaUrl(page.html);
+        if (!mediaUrl) return [];
+        var streams = [], seenStreams = {};
+        return addMediaEntry({ url: mediaUrl, quality: "" }, pageUrl, "Main", streams, seenStreams).then(function () { return streams; });
+      });
+    })).then(function (parts) {
+      var result = [];
+      for (var i = 0; i < parts.length; i++) result = result.concat(parts[i]);
+      return result;
+    });
+  }).then(function (streams) {
+    var result = [], seen = {};
+    for (var i = 0; i < streams.length; i++) {
+      if (seen[streams[i].url]) continue;
+      seen[streams[i].url] = true;
+      streams[i].name = String(streams[i].name || "Krmizi").replace(/^Krmizi/, source.name);
+      streams[i].title = String(streams[i].title || "Krmizi").replace(/^Krmizi/, source.name);
+      streams[i].provider = source.name;
+      streams[i].language = "ar";
+      result.push(streams[i]);
+    }
+    return result;
+  }).catch(function () { return []; });
+}
+
 function resolveExtraSource(metadata, source, requests) {
   if (source.search === "3ick") return resolve3ickSource(metadata, source, requests);
   if (source.search === "qeseh") return resolveQesehSource(metadata, source, requests);
+  if (source.search === "faselhd") return resolveFaselhdSource(metadata, source, requests);
+  if (source.search === "dailymotion") return resolveDailymotionSource(metadata, source, requests);
+  if (source.search === "okru") return resolveOkruSource(metadata, source, requests);
   var bases = source.bases || [], baseIndex = 0, triedBases = {};
   function nextBase() {
     while (baseIndex < bases.length && triedBases[bases[baseIndex]]) baseIndex++;

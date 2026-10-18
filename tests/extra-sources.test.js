@@ -8,10 +8,10 @@ const fragment=fs.readFileSync(require.resolve('../providers/extra-sources.fragm
 function setup(){const ctx={module:{exports:{}},require:()=>cheerio,console:{log(){}},fetch:()=>Promise.reject(Error('unexpected network'))};vm.createContext(ctx);vm.runInContext(core+'\n'+fragment,ctx);return ctx;}
 const metadata={titles:['تحت الأرض','Yeraltı'],year:2026};
 
-test('only the seven Arabic-translated catalogs are registered',()=>{
+test('only the ten Arabic-translated catalogs are registered',()=>{
  const c=setup();
  assert.deepEqual(Array.from(c.SOURCES,s=>s.name).sort(),['Krmizi','Qisat','ShoofLive']);
- assert.deepEqual(Array.from(c.EXTRA_SOURCES,s=>s.name).sort(),['3ick','3skNews','Qeseh','Shahid4U']);
+ assert.deepEqual(Array.from(c.EXTRA_SOURCES,s=>s.name).sort(),['3ick','3skNews','Dailymotion','FaselHD','Qeseh','Qesset','Shahid4U']);
  const all=c.SOURCES.concat(c.EXTRA_SOURCES);
  for(const removed of ['NOW','DDizi','TVDiziler']) assert(!all.some(s=>s.name===removed));
  assert(all.every(s=>String(s.language||'ar')==='ar'));
@@ -92,6 +92,22 @@ test('strict owned heading rejects العهد inside ولي العهد even when
  assert.equal(c.extraPageTitleMatches('<h1>مسلسل العهد الحلقة 1</h1>',{titles:['العهد','Söz']}),true);
 });
 
+
+
+test('FaselHD walks its category, series and episode pages to a supported player',async()=>{
+ const c=setup(),base='https://faselhd.watch',calls=[];
+ const pages={
+  [base+'/?fho_cat=turkish-series']:'<a href="https://faselhd.watch/series/mslsl-alzwaj-gmil/">مسلسل الزواج جميل مترجم</a>',
+  'https://faselhd.watch/series/mslsl-alzwaj-gmil/':'<h1>مسلسل الزواج جميل مترجم</h1><a href="https://faselhd.watch/episode/mslsl-alzwaj-gmil-alhlqa-1/">1 الحلقة</a><a href="https://faselhd.watch/episode/mslsl-alzwaj-gmil-alhlqa-2/">2 الحلقة</a>',
+  'https://faselhd.watch/episode/mslsl-alzwaj-gmil-alhlqa-1/':'<title>مسلسل الزواج جميل الحلقة 1 الاولى مترجمة</title><iframe src="https://cdnplus.space/embed-4yur.html"></iframe>'
+ };
+ c.fetch=async(url)=>{calls.push(url);if(pages[url]===undefined)throw Error('unexpected '+url);return{ok:true,status:200,url,text:async()=>pages[url]};};
+ c.resolveEmbedTarget=async(target,request,streams)=>{assert.equal(target.url,'https://cdnplus.space/embed-4yur.html');assert.equal(request.episode,1);streams.push({url:'https://media.test/master.m3u8',name:'Krmizi',title:'Krmizi',quality:'1080p'});};
+ const result=await c.resolveFaselhdSource({titles:['الزواج جميل','مسلسل الزواج جميل مترجم']},{name:'FaselHD',bases:[base],search:'faselhd',language:'ar'},[{season:1,episode:1}]);
+ assert.equal(result.length,1);assert.equal(result[0].provider,'FaselHD');assert.equal(result[0].language,'ar');assert.equal(result[0].quality,'1080p');
+ assert(calls.includes('https://faselhd.watch/episode/mslsl-alzwaj-gmil-alhlqa-1/'));
+ assert(!calls.some(url=>url.endsWith('alhlqa-2/')));
+});
 
 test('Qeseh follows search, archive page, qesen wrapper and Arab HD embed',async()=>{
  const c=setup(),base='https://wwv.qeseh.com',calls=[];
