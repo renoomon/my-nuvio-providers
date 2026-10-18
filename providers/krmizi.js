@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.19.0
+ * Version: 0.20.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
@@ -18,12 +18,12 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.19.0";
+var VERSION = "0.20.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
-  { name: "Krmizi", bases: ["https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
-  { name: "ShoofLive", bases: ["https://s5.shooflive.cyou", "https://shooflive.net"], index: "/turkish-series/" },
-  { name: "Qisat", bases: ["https://www.qisat.tv", "https://v1.qisat.sbs"], index: "/turkish-series/" }
+  { name: "Krmizi", bases: ["https://qrmizitv.com", "https://krmzitv.com", "https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
+  { name: "ShoofLive", bases: ["https://s5.shooflive.cyou", "https://s2.shooflive.cyou", "https://s6.shooflive.cyou", "https://shooflive.net"], index: "/turkish-series/" },
+  { name: "Qisat", bases: ["https://www.qisat.tv", "https://v2.qisat.sbs", "https://v1.qisat.sbs"], index: "/turkish-series/" }
 ];
 var SITE_BASES = SOURCES[0].bases;
 var MAX_INDEX_PAGES = 6;
@@ -879,7 +879,7 @@ function findExactEpisode(series, wantedSeason, wantedEpisode) {
 }
 
 function anaPlayerAllowed(url) {
-  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:anaplayer\.online|shoof\.site|shooof\.site|shadwo\.pro)\/albaplayer\//i.test(String(url || ""));
+  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:anaplayer\.online|shoof\.site|shooof\.site|shooof\.online|shooof\.cyou|shooflive\.watch|shadwo\.pro)\/albaplayer\//i.test(String(url || ""));
 }
 
 function directMedia(url) {
@@ -907,13 +907,13 @@ function verifyEpisodePage(series, episodeCandidate, wantedSeason, wantedEpisode
       return null;
     }
 
-    var playerNode = $(".getEmbed .watch iframe[src]").first();
-    var playerUrl = absUrl(playerNode.attr("src"), result.url);
+    var playerUrl = "";
+    $(".getEmbed iframe[src], .getEmbed video[src], .getEmbed source[src], iframe[src], video[src], source[src]").each(function (_, element) {
+      if (playerUrl) return;
+      var candidate = absUrl(wrap($, element).attr("src"), result.url);
+      if (candidate && (anaPlayerAllowed(candidate) || directMedia(candidate) || sameOriginEmbedAllowed(candidate, result.url))) playerUrl = candidate;
+    });
     if (!playerUrl) {
-      var directNode = $(".getEmbed .watch video[src], .getEmbed .watch source[src]").first();
-      playerUrl = absUrl(directNode.attr("src"), result.url);
-    }
-    if (!playerUrl || (!anaPlayerAllowed(playerUrl) && !directMedia(playerUrl))) {
       logFailure("player_not_found", "page_container");
       return null;
     }
@@ -1397,6 +1397,38 @@ function resolveAnaPlayer(playerUrl, episodeUrl, wantedSeason, wantedEpisode, id
   });
 }
 
+
+function sameOriginEmbedAllowed(url, pageUrl) {
+  return !!url && !!pageUrl && originOf(url) === originOf(pageUrl) && /\/(?:embed|player|watch)\//i.test(pathKey(url));
+}
+
+function resolveSameOriginEmbed(embedUrl, episodeUrl, season, episode, identities) {
+  return fetchTextInfo(embedUrl, episodeUrl, originOf(episodeUrl)).then(function (page) {
+    var $ = cheerio.load(page.html), streams = [], seenStreams = {};
+    var nested = "";
+    $("iframe[src], iframe[data-src]").each(function (_, element) {
+      if (nested) return;
+      var frame = wrap($, element);
+      var url = absUrl(frame.attr("src") || frame.attr("data-src"), page.url);
+      if (url && anaPlayerAllowed(url)) nested = url;
+    });
+    if (nested) return resolveAnaPlayer(nested, page.url, season, episode, identities);
+    var direct = "";
+    $("video[src], video source[src], source[src]").each(function (_, element) {
+      if (direct) return;
+      var url = absUrl(wrap($, element).attr("src"), page.url);
+      if (url && directMedia(url)) direct = url;
+    });
+    if (direct) {
+      return addMediaEntry({ url: direct, quality: qualityFromText(direct) }, page.url, "Main", streams, seenStreams).then(function () { return streams; });
+    }
+    var entries = mediaEntriesFromHtml(page.html);
+    return Promise.all(entries.map(function (entry) {
+      return addMediaEntry(entry, page.url, "Main", streams, seenStreams);
+    })).then(function () { return streams; });
+  }).catch(function () { return []; });
+}
+
 function resolvePlayer(verifiedEpisode) {
   if (directMedia(verifiedEpisode.playerUrl)) {
     var streams = [];
@@ -1412,6 +1444,15 @@ function resolvePlayer(verifiedEpisode) {
 
   if (anaPlayerAllowed(verifiedEpisode.playerUrl)) {
     return resolveAnaPlayer(
+      verifiedEpisode.playerUrl,
+      verifiedEpisode.episodeUrl,
+      verifiedEpisode.season,
+      verifiedEpisode.episode,
+      verifiedEpisode.identities
+    );
+  }
+  if (sameOriginEmbedAllowed(verifiedEpisode.playerUrl, verifiedEpisode.episodeUrl)) {
+    return resolveSameOriginEmbed(
       verifiedEpisode.playerUrl,
       verifiedEpisode.episodeUrl,
       verifiedEpisode.season,
