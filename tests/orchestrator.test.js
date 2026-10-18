@@ -110,3 +110,30 @@ test('getStreams returns Arabic streams only',async()=>{
   const streams=await ctx.module.exports.getStreams('123','tv',1,1);
   assert.equal(streams.length,1);assert.equal(streams[0].url,'https://extra.test/ar.mp4');assert.equal(streams[0].language,'ar');
 });
+
+for (const failure of ['missing episode', 'deleted player', 'failed verification']) {
+  test('base source tries its next mirror after ' + failure, async () => {
+    const {ctx, timers}=runtime(network);
+    const broken='https://broken.test', healthy='https://catalog.test';
+    ctx.SOURCES=[{name:'ShoofLive',bases:[broken,healthy],index:'/turkish-series/'}];
+    ctx.getTmdbMetadata=()=>Promise.resolve(metadata);
+    const attempted=[];
+    ctx.resolveSeries=(_,candidate)=>{
+      const origin=candidate.bases[0];attempted.push(origin);
+      return Promise.resolve({url:origin+'/series/yeralti/',html:origin===broken && failure==='missing episode' ? '<h1>تحت الارض</h1>' : seriesHtml});
+    };
+    const verify=ctx.verifyEpisodePage, player=ctx.resolvePlayer;
+    ctx.verifyEpisodePage=(series,...args)=>{
+      if(series.url.startsWith(broken)) {
+        if(failure==='failed verification') return Promise.reject(Error('http_404'));
+        return Promise.resolve({broken:true});
+      }
+      return verify(series,...args);
+    };
+    ctx.resolvePlayer=verified=>verified.broken ? Promise.resolve([]) : player(verified);
+    const streams=await ctx.getStreams('123','tv',2,1);
+    assert.deepEqual(attempted,[broken,healthy]);
+    assert.equal(streams.length,1);assert.equal(streams[0].url,mediaUrl(17));
+    assert.equal(streams[0].provider,'ShoofLive');assert.equal(timers.size,0);
+  });
+}

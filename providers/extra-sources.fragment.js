@@ -614,17 +614,9 @@ function qesehEpisodeLinks(html, pageUrl, requests, seriesTitle) {
     if (!url || originOf(url) !== originOf(pageUrl) || !/\/clarus\/[^\/?]+-episode-(\d+)\/?$/i.test(url)) return;
     var match = url.match(/-episode-(\d+)\/?$/i), number = parseInt(match[1], 10);
     if (!number) return;
-    var request = null;
-    for (var r = 0; r < requests.length; r++) {
-      if (requests[r].episode === number) {
-        request = { season: requests[r].season, episode: number, identities: requests[r].identities || requests };
-        break;
-      }
-    }
-    if (!request) return;
     var identity = extraAnchorIdentity(a) + " " + url;
-    var explicit = explicitSeasonEpisode(identity);
-    if (explicit && explicit.season !== request.season) return;
+    var request = extraRequestMatch(identity + " الحلقة " + number, requests);
+    if (!request) return;
     var key = extraUrlKey(url);
     if (seen[key]) return;
     seen[key] = true;
@@ -894,16 +886,8 @@ function faselhdEpisodeLinks(html, pageUrl, requests) {
     var identity = extraAnchorIdentity(a);
     var number = faselhdEpisodeNumber(url, identity);
     if (!number) return;
-    var request = null;
-    for (var r = 0; r < requests.length; r++) {
-      if (requests[r].episode === number) {
-        request = { season: requests[r].season, episode: number, identities: requests[r].identities || requests };
-        break;
-      }
-    }
+    var request = extraRequestMatch(identity + " " + url + " الحلقة " + number, requests);
     if (!request) return;
-    var explicit = explicitSeasonEpisode(identity + " " + url);
-    if (explicit && explicit.season !== request.season) return;
     var key = extraUrlKey(url);
     if (seen[key]) return;
     seen[key] = true;
@@ -969,7 +953,8 @@ function resolveFaselhdSource(metadata, source, requests) {
             return fetchTextInfo(episode.url, page.url, "").catch(function () { return null; }).then(function (episodePage) {
               if (!episodePage) return [];
               var episodeIdentity = extraPageIdentity(episodePage.html);
-              if (extraEpisodeNumber(episodeIdentity + " " + episodePage.url) !== episode.request.episode) return [];
+              if (!extraPageTitleMatches(episodePage.html, metadata) || /مدبلج|dubbed|dublaj/i.test(episodeIdentity)) return [];
+              if (!extraRequestMatch(episodeIdentity + " " + episodePage.url, requests) || extraEpisodeNumber(episodeIdentity + " " + episodePage.url) !== episode.request.episode) return [];
               var targets = faselhdPlayerTargets(episodePage.html, episodePage.url);
               var streams = [], seenStreams = {};
               return Promise.all(targets.map(function (target) {
@@ -1020,23 +1005,38 @@ function dailymotionVideoId(url) {
   return match ? match[1] : "";
 }
 
+function dailymotionArabicCandidate(video, metadata, requests) {
+  var title = String(video && video.title || ""), description = String(video && video.description || "");
+  var evidence = title + " " + description;
+  if (/مدبلج|dublaj|dubbed|english[\s_-]*(?:sub|subtitle)|eng[\s_-]*sub|ترجم[ةه]\s+انجليزي/i.test(evidence)) return null;
+  if (/اعلان|إعلان|ملخص|مقطع|trailer|fragman|teaser|promo/i.test(title) || !(Number(video.duration) >= 1200)) return null;
+  // A search query does not establish the language of its results. In
+  // particular Dailymotion returns "Ezel English Sub" to Arabic queries.
+  var arabicClaim = /(?:arabic[\s_-]*(?:sub|subtitle)|(?:sub|subtitle)[\s_-]*arabic|بالعربي[ةه]?|ترجم[ةه]\s+عربي[ةه]?)/i.test(evidence) ||
+    (/[\u0600-\u06ff]/.test(title) && /مترجم[ةه]?/.test(title));
+  if (!arabicClaim) return null;
+  var ownTitle = title.replace(/\b(?:arabic[\s_-]*(?:subs?|subtitles?)|(?:subs?|subtitles?)[\s_-]*arabic)\b/ig," ").replace(/بالعربي[ةه]?/g," ");
+  if (!catalogTitleMatches(ownTitle,metadata.titles)) return null;
+  return extraRequestMatch(title,requests);
+}
+
 function resolveDailymotionSource(metadata, source, requests) {
   var titles = extraQueryTitles(metadata).slice(0, 6);
   var queries = [], seenQuery = {};
-  for (var r = 0; r < requests.length; r++) {
-    for (var t = 0; t < titles.length; t++) {
+  // Interleave numbering candidates so absolute numbering is not starved
+  // when the seasonal request has several translated title aliases.
+  for (var t = 0; t < titles.length && queries.length < 6; t++) {
+    for (var r = 0; r < requests.length && queries.length < 6; r++) {
       var query = dailymotionSearchQuery(titles[t], requests[r].episode);
       if (!query || seenQuery[query]) continue;
       seenQuery[query] = true;
       queries.push({ query: query, request: requests[r] });
-      if (queries.length >= 6) break;
     }
-    if (queries.length >= 6) break;
   }
   if (!queries.length) return Promise.resolve([]);
   return Promise.all(queries.map(function (entry) {
     var url = "https://api.dailymotion.com/videos?search=" + encodeURIComponent(entry.query) +
-      "&limit=20&sort=relevance&fields=id,title,duration,url";
+      "&limit=20&sort=relevance&fields=id,title,description,duration,url";
     return fetchJson(url, "https://www.dailymotion.com/", "https://www.dailymotion.com")
       .catch(function () { return null; })
       .then(function (data) { return { videos: data && data.list || [], request: entry.request }; });
@@ -1049,22 +1049,23 @@ function resolveDailymotionSource(metadata, source, requests) {
         if (!video || !video.id || seen[video.id]) continue;
         var title = String(video.title || "");
         if (!title) continue;
-        if (fieldMatchScore(title, metadata.titles) < 80 && !catalogTitleMatches(title, metadata.titles)) continue;
-        if (/مدبلج|dublaj|dubbed/i.test(title)) continue;
-        var explicit = explicitSeasonEpisode(title);
-        if (explicit && explicit.season !== request.season) continue;
-        var number = extraEpisodeNumber(title);
-        if (number !== request.episode) continue;
+        var matchedRequest = dailymotionArabicCandidate(video,metadata,[request]);
+        if (!matchedRequest) continue;
         seen[video.id] = true;
-        candidates.push({ id: video.id, title: title, request: request });
+        candidates.push({ id: video.id, title: title, request: matchedRequest });
       }
     }
-    candidates = candidates.slice(0, 3);
-    var streams = [], seenStreams = {};
-    return Promise.all(candidates.map(function (candidate) {
-      var url = "https://www.dailymotion.com/video/" + candidate.id;
-      return resolveDailymotion(url, "https://www.dailymotion.com/", "Main", streams, seenStreams).catch(function () {});
-    })).then(function () { return streams; });
+    candidates = candidates.slice(0, 9);
+    var streams = [], seenStreams = {}, offset = 0;
+    function nextCandidates() {
+      var batch = candidates.slice(offset,offset + 3); offset += 3;
+      if (!batch.length) return Promise.resolve(streams);
+      return Promise.all(batch.map(function(candidate) {
+        var url = "https://www.dailymotion.com/video/" + candidate.id;
+        return resolveDailymotion(url,"https://www.dailymotion.com/","Main",streams,seenStreams).catch(function(){});
+      })).then(function(){return streams.length ? streams : nextCandidates();});
+    }
+    return nextCandidates();
   }).then(function (streams) {
     var result = [], seen = {};
     for (var i = 0; i < streams.length; i++) {

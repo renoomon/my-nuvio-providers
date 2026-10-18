@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.20.0
+ * Version: 0.21.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
@@ -18,7 +18,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.20.0";
+var VERSION = "0.21.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
   { name: "Krmizi", bases: ["https://qrmizitv.com", "https://krmzitv.com", "https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
@@ -575,6 +575,7 @@ function verifySeriesCard(card, titles, indexUrl) {
   return fetchTextInfo(card.url, indexUrl, "").then(function (result) {
     var $ = cheerio.load(result.html);
     var identity = seriesSelfIdentity($);
+    if (/مدبلج|dubbed|dublaj/i.test(identity.headings.join(" "))) return null;
     var headingScore = 0;
     var detailScore = fieldMatchScore(result.url, titles);
     var i;
@@ -623,7 +624,7 @@ function verifySeriesCardWeak(card, titles, indexUrl) {
   return fetchTextInfo(card.url, indexUrl, "").then(function (result) {
     var $ = cheerio.load(result.html);
     var heading = ($(".singleSeries h1").first().text() || $("h1").first().text() || "").replace(/\s+/g, " ").trim();
-    if (!heading) return null;
+    if (!heading || /مدبلج|dubbed|dublaj/i.test(heading)) return null;
     return { url: result.url, html: result.html, heading: heading, score: card.score, weakAlias: heading };
   }).catch(function () { return null; });
 }
@@ -895,6 +896,7 @@ function verifyEpisodePage(series, episodeCandidate, wantedSeason, wantedEpisode
       $("title").first().text() || ""
     ];
     var heading = headingFields.join(" ");
+    if (/مدبلج|dubbed|dublaj/i.test(heading)) return null;
     if (episodeNumber(heading) !== wantedEpisode) {
       logFailure("episode_identity_mismatch", "number");
       return null;
@@ -2097,17 +2099,9 @@ function qesehEpisodeLinks(html, pageUrl, requests, seriesTitle) {
     if (!url || originOf(url) !== originOf(pageUrl) || !/\/clarus\/[^\/?]+-episode-(\d+)\/?$/i.test(url)) return;
     var match = url.match(/-episode-(\d+)\/?$/i), number = parseInt(match[1], 10);
     if (!number) return;
-    var request = null;
-    for (var r = 0; r < requests.length; r++) {
-      if (requests[r].episode === number) {
-        request = { season: requests[r].season, episode: number, identities: requests[r].identities || requests };
-        break;
-      }
-    }
-    if (!request) return;
     var identity = extraAnchorIdentity(a) + " " + url;
-    var explicit = explicitSeasonEpisode(identity);
-    if (explicit && explicit.season !== request.season) return;
+    var request = extraRequestMatch(identity + " الحلقة " + number, requests);
+    if (!request) return;
     var key = extraUrlKey(url);
     if (seen[key]) return;
     seen[key] = true;
@@ -2377,16 +2371,8 @@ function faselhdEpisodeLinks(html, pageUrl, requests) {
     var identity = extraAnchorIdentity(a);
     var number = faselhdEpisodeNumber(url, identity);
     if (!number) return;
-    var request = null;
-    for (var r = 0; r < requests.length; r++) {
-      if (requests[r].episode === number) {
-        request = { season: requests[r].season, episode: number, identities: requests[r].identities || requests };
-        break;
-      }
-    }
+    var request = extraRequestMatch(identity + " " + url + " الحلقة " + number, requests);
     if (!request) return;
-    var explicit = explicitSeasonEpisode(identity + " " + url);
-    if (explicit && explicit.season !== request.season) return;
     var key = extraUrlKey(url);
     if (seen[key]) return;
     seen[key] = true;
@@ -2452,7 +2438,8 @@ function resolveFaselhdSource(metadata, source, requests) {
             return fetchTextInfo(episode.url, page.url, "").catch(function () { return null; }).then(function (episodePage) {
               if (!episodePage) return [];
               var episodeIdentity = extraPageIdentity(episodePage.html);
-              if (extraEpisodeNumber(episodeIdentity + " " + episodePage.url) !== episode.request.episode) return [];
+              if (!extraPageTitleMatches(episodePage.html, metadata) || /مدبلج|dubbed|dublaj/i.test(episodeIdentity)) return [];
+              if (!extraRequestMatch(episodeIdentity + " " + episodePage.url, requests) || extraEpisodeNumber(episodeIdentity + " " + episodePage.url) !== episode.request.episode) return [];
               var targets = faselhdPlayerTargets(episodePage.html, episodePage.url);
               var streams = [], seenStreams = {};
               return Promise.all(targets.map(function (target) {
@@ -2503,23 +2490,38 @@ function dailymotionVideoId(url) {
   return match ? match[1] : "";
 }
 
+function dailymotionArabicCandidate(video, metadata, requests) {
+  var title = String(video && video.title || ""), description = String(video && video.description || "");
+  var evidence = title + " " + description;
+  if (/مدبلج|dublaj|dubbed|english[\s_-]*(?:sub|subtitle)|eng[\s_-]*sub|ترجم[ةه]\s+انجليزي/i.test(evidence)) return null;
+  if (/اعلان|إعلان|ملخص|مقطع|trailer|fragman|teaser|promo/i.test(title) || Number(video.duration) < 1200) return null;
+  // A search query does not establish the language of its results. In
+  // particular Dailymotion returns "Ezel English Sub" to Arabic queries.
+  var arabicClaim = /(?:arabic[\s_-]*(?:sub|subtitle)|(?:sub|subtitle)[\s_-]*arabic|بالعربي[ةه]?|ترجم[ةه]\s+عربي[ةه]?)/i.test(evidence) ||
+    (/[\u0600-\u06ff]/.test(title) && /مترجم[ةه]?/.test(title));
+  if (!arabicClaim) return null;
+  var ownTitle = title.replace(/\b(?:arabic[\s_-]*(?:subs?|subtitles?)|(?:subs?|subtitles?)[\s_-]*arabic)\b/ig," ").replace(/بالعربي[ةه]?/g," ");
+  if (!catalogTitleMatches(ownTitle,metadata.titles)) return null;
+  return extraRequestMatch(title,requests);
+}
+
 function resolveDailymotionSource(metadata, source, requests) {
   var titles = extraQueryTitles(metadata).slice(0, 6);
   var queries = [], seenQuery = {};
-  for (var r = 0; r < requests.length; r++) {
-    for (var t = 0; t < titles.length; t++) {
+  // Interleave numbering candidates so absolute numbering is not starved
+  // when the seasonal request has several translated title aliases.
+  for (var t = 0; t < titles.length && queries.length < 6; t++) {
+    for (var r = 0; r < requests.length && queries.length < 6; r++) {
       var query = dailymotionSearchQuery(titles[t], requests[r].episode);
       if (!query || seenQuery[query]) continue;
       seenQuery[query] = true;
       queries.push({ query: query, request: requests[r] });
-      if (queries.length >= 6) break;
     }
-    if (queries.length >= 6) break;
   }
   if (!queries.length) return Promise.resolve([]);
   return Promise.all(queries.map(function (entry) {
     var url = "https://api.dailymotion.com/videos?search=" + encodeURIComponent(entry.query) +
-      "&limit=20&sort=relevance&fields=id,title,duration,url";
+      "&limit=20&sort=relevance&fields=id,title,description,duration,url";
     return fetchJson(url, "https://www.dailymotion.com/", "https://www.dailymotion.com")
       .catch(function () { return null; })
       .then(function (data) { return { videos: data && data.list || [], request: entry.request }; });
@@ -2532,22 +2534,23 @@ function resolveDailymotionSource(metadata, source, requests) {
         if (!video || !video.id || seen[video.id]) continue;
         var title = String(video.title || "");
         if (!title) continue;
-        if (fieldMatchScore(title, metadata.titles) < 80 && !catalogTitleMatches(title, metadata.titles)) continue;
-        if (/مدبلج|dublaj|dubbed/i.test(title)) continue;
-        var explicit = explicitSeasonEpisode(title);
-        if (explicit && explicit.season !== request.season) continue;
-        var number = extraEpisodeNumber(title);
-        if (number !== request.episode) continue;
+        var matchedRequest = dailymotionArabicCandidate(video,metadata,[request]);
+        if (!matchedRequest) continue;
         seen[video.id] = true;
-        candidates.push({ id: video.id, title: title, request: request });
+        candidates.push({ id: video.id, title: title, request: matchedRequest });
       }
     }
-    candidates = candidates.slice(0, 3);
-    var streams = [], seenStreams = {};
-    return Promise.all(candidates.map(function (candidate) {
-      var url = "https://www.dailymotion.com/video/" + candidate.id;
-      return resolveDailymotion(url, "https://www.dailymotion.com/", "Main", streams, seenStreams).catch(function () {});
-    })).then(function () { return streams; });
+    candidates = candidates.slice(0, 9);
+    var streams = [], seenStreams = {}, offset = 0;
+    function nextCandidates() {
+      var batch = candidates.slice(offset,offset + 3); offset += 3;
+      if (!batch.length) return Promise.resolve(streams);
+      return Promise.all(batch.map(function(candidate) {
+        var url = "https://www.dailymotion.com/video/" + candidate.id;
+        return resolveDailymotion(url,"https://www.dailymotion.com/","Main",streams,seenStreams).catch(function(){});
+      })).then(function(){return streams.length ? streams : nextCandidates();});
+    }
+    return nextCandidates();
   }).then(function (streams) {
     var result = [], seen = {};
     for (var i = 0; i < streams.length; i++) {
@@ -2785,21 +2788,34 @@ function getStreams(tmdbId, mediaType, season, episode) {
           });
           return resolveExtraSource(metadata, source, aliases);
         }
-        return resolveSeries(metadata, source).then(function (series) {
-          if (!series) return [];
-          log("matched_series", series.url);
-          var requests = siteEpisodeRequests(series, metadata, wantedSeason, wantedEpisode), index = 0;
-          function nextEpisode() {
-            if (index >= requests.length) return Promise.resolve([]);
-            var request = requests[index++];
-            var candidate = findExactEpisode(series, request.season, request.episode);
-            if (!candidate) return nextEpisode();
-            return verifyEpisodePage(series, candidate, request.season, request.episode, request).then(function (verified) {
-              return verified ? resolvePlayer(verified) : [];
-            }).then(function (streams) { return streams.length ? streams : nextEpisode(); });
-          }
-          return nextEpisode();
-        });
+        // A catalog match is not a playable episode. Try the next mirror
+        // when this mirror lacks the episode or its player has disappeared.
+        var mirrorIndex = 0, mirrors = source.bases || [null];
+        function nextMirror() {
+          if (mirrorIndex >= mirrors.length) return Promise.resolve([]);
+          var mirror = mirrors[mirrorIndex++];
+          var candidateSource = mirror ? { name: source.name, bases: [mirror], index: source.index } : source;
+          return resolveSeries(metadata, candidateSource).then(function (series) {
+            if (!series) return [];
+            log("matched_series", series.url);
+            var requests = siteEpisodeRequests(series, metadata, wantedSeason, wantedEpisode), index = 0;
+            function nextEpisode() {
+              if (index >= requests.length) return Promise.resolve([]);
+              var request = requests[index++];
+              var candidate = findExactEpisode(series, request.season, request.episode);
+              if (!candidate) return nextEpisode();
+              return verifyEpisodePage(series, candidate, request.season, request.episode, request).then(function (verified) {
+                return verified ? resolvePlayer(verified) : [];
+              }).catch(function () { return []; }).then(function (streams) {
+                return streams.length ? streams : nextEpisode();
+              });
+            }
+            return nextEpisode();
+          }).catch(function () { return []; }).then(function (streams) {
+            return streams.length ? streams : nextMirror();
+          });
+        }
+        return nextMirror();
       });
       return withDeadline(work, 32000, "source_timeout " + source.name).catch(function (error) {
         logFailure("source_failed", source.name + " " + errorMessage(error).replace(/api_key=[^&\s]+/gi, "api_key=REDACTED"));

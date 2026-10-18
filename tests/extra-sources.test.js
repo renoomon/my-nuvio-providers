@@ -170,3 +170,30 @@ test('3ick does not invent a player when its watch page redirects after a missin
  c.extraResolveOwnedPlayer=async()=>{resolved++;return[];};
  const result=await c.threeickResolveEpisode({url:episode},{titles:['اصطدام']},[{season:1,episode:1}],session,base+'/');assert.equal(result.length,0);assert.equal(resolved,0);
 });
+
+test('Arabic Dailymotion queries never label the live English-subtitled Ezel result as Arabic',()=>{
+ const c=setup(),m={titles:['Ezel','ايزل']},request=[{season:1,episode:1}];
+ assert.equal(c.dailymotionArabicCandidate({title:'Ezel English Sub Episode 1',description:'#EzelEnglish',duration:5073},m,request),null);
+ assert.equal(c.dailymotionArabicCandidate({title:'Ezel Episode 1',description:'A Turkish drama',duration:5073},m,request),null);
+ assert.equal(c.dailymotionArabicCandidate({title:'مسلسل ايزل الحلقة 1 مترجم',duration:5073},m,request).episode,1);
+ assert.equal(c.dailymotionArabicCandidate({title:'مسلسل ايزل الحلقة 1 مترجم',description:'English subtitles',duration:5073},m,request),null);
+ assert.equal(c.dailymotionArabicCandidate({title:'مسلسل ايزل الحلقة 1 مترجم',duration:90},m,request),null);
+ assert.equal(c.dailymotionArabicCandidate({title:'مسلسل ولي العهد الحلقة 1 مترجم',duration:5073},{titles:['العهد']},request),null);
+});
+test('flat Qeseh and Fasel episode one cannot satisfy an unmapped season-two request',()=>{
+ const c=setup(),requests=[{season:2,episode:1}],q='<a href="/clarus/yeralti-episode-1/">الحلقة 1</a>',f='<a href="/episode/yeralti-alhlqa-1/">1 الحلقة</a>';
+ assert.equal(c.qesehEpisodeLinks(q,'https://qesset.com/yeni-show/yeralti/',requests,'تحت الأرض').length,0);
+ assert.equal(c.faselhdEpisodeLinks(f,'https://faselhd.watch/series/yeralti/',requests).length,0);
+ const aliases=[{season:2,episode:1},{season:1,episode:17}];
+ assert.equal(c.qesehEpisodeLinks(q.replaceAll('1','17'),'https://qesset.com/yeni-show/yeralti/',aliases,'تحت الأرض')[0].request.episode,17);
+ assert.equal(c.faselhdEpisodeLinks(f.replaceAll('1','17'),'https://faselhd.watch/series/yeralti/',aliases)[0].request.episode,17);
+});
+test('Dailymotion interleaves numbering aliases and tries a healthy candidate beyond deleted search hits',async()=>{
+ const c=setup(),queries=[],resolved=[];
+ c.extraQueryTitles=()=>['اصطدام','Çarpışma','Collision','Crash','اصطدام مترجم','عنوان'];
+ c.fetchJson=async url=>{queries.push(decodeURIComponent(url));return{list:[1,2,3,4].map(n=>({id:'video'+n,title:'مسلسل اصطدام الحلقة 17 مترجم',duration:8358}))};};
+ c.resolveDailymotion=async(url,referer,label,streams)=>{resolved.push(url);if(url.endsWith('video4'))streams.push({url:'https://media.test/live.m3u8',name:'Krmizi',title:'Krmizi'});};
+ const result=await c.resolveDailymotionSource({titles:['اصطدام','Çarpışma']},{name:'Dailymotion'},[{season:2,episode:1},{season:1,episode:17}]);
+ assert.equal(result.length,1);assert.equal(result[0].language,'ar');assert(resolved.some(url=>url.endsWith('video4')));
+ assert(queries.some(url=>url.includes('الحلقة 1 مترجم')));assert(queries.some(url=>url.includes('الحلقة 17 مترجم')));
+});

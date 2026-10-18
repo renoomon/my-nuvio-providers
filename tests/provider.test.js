@@ -144,7 +144,8 @@ test('all sources are started before a pending source completes', async () => {
   const result=ctx.module.exports.getStreams('123','tv',2,1);
   // Drain microtasks for metadata and source jobs without introducing timers.
   for(let i=0;i<40;i++) await Promise.resolve();
-  assert.deepEqual(started,['Krmizi','ShoofLive','Qisat']);
+  assert.deepEqual(started.slice(0,3),['Krmizi','ShoofLive','Qisat']);
+  assert.equal(started.filter(name=>name==='Krmizi').length,1);
   release(null);
   assert.equal((await result).length,0);
 });
@@ -412,4 +413,17 @@ test('Arabic finale branding and normalized feminine first-episode labels preser
   assert.equal(ctx.catalogTitleMatches('مسلسل اصطدام الحلقة 24 | قصة عشق - الاخيرة',['اصطدام','Çarpışma']),true);
   assert.equal(ctx.catalogTitleMatches('مسلسل العهد الموسم الاول الحلقة 1 الاولى مترجمة - HD',['العهد','Söz']),true);
   assert.equal(ctx.catalogTitleMatches('مسلسل ولي العهد الحلقة 1 الاولى مترجمة - HD',['العهد','Söz']),false);
+});
+
+
+test('translated catalog discovery rejects dubbed series in strict and alias matching', async () => {
+  const {ctx}=runtime(url=>response('<h1>مسلسل تحت الارض مدبلج</h1>',url));
+  const card={url:seriesUrl,heading:'تحت الارض',score:100,weak:true};
+  assert.equal(await ctx.verifySeriesCard(card,['تحت الارض'],base),null);
+  assert.equal(await ctx.verifySeriesCardWeak(card,['تحت الارض'],base),null);
+});
+
+test('episode verification rejects a dubbed copy even when series and episode match', async () => {
+  const {ctx}=runtime(url=>response(episodeHtml(1).replace('مسلسل تحت الارض الحلقة 1','مسلسل تحت الارض الحلقة 1 مدبلج'),url));
+  assert.equal(await ctx.verifyEpisodePage({url:seriesUrl},{url:episodeUrl(1)},1,1),null);
 });
