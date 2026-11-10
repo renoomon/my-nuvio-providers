@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.24.0
+ * Version: 0.25.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
@@ -18,7 +18,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.24.0";
+var VERSION = "0.25.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
   { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
@@ -108,6 +108,15 @@ function urlKey(url) {
 function pathKey(url) {
   var match = urlKey(url).match(/^https?:\/\/[^\/]+(\/.*)$/i);
   return match ? match[1] : "";
+}
+
+/* The player page and its own server links can spell one episode with
+ * different separators (`/albaplayer/ezel.S01E07` vs
+ * `/albaplayer/ezel-s01e07?serv=1`). Compare a separator-insensitive key
+ * only; the original URL is kept untouched for fetching and display.
+ */
+function serverPathKey(url) {
+  return pathKey(url).replace(/[._-]+/g, "-");
 }
 
 function requestHeaders(referer, origin, accept) {
@@ -1297,12 +1306,12 @@ function collectAnaServers(html, playerUrl) {
   var servers = [];
   var seen = {};
   var playerOrigin = originOf(playerUrl);
-  var playerPath = pathKey(playerUrl);
+  var playerPath = serverPathKey(playerUrl);
 
   $('a.aplr-link[href*="?serv="], a[href*="?serv="]').each(function (_, element) {
     var anchor = wrap($, element);
     var url = absUrl(anchor.attr("href"), playerUrl);
-    if (!url || originOf(url) !== playerOrigin || pathKey(url) !== playerPath || seen[url]) return;
+    if (!url || originOf(url) !== playerOrigin || serverPathKey(url) !== playerPath || seen[url]) return;
     var servMatch = url.match(/[?&]serv=(\d+)/i);
     if (!servMatch) return;
     seen[url] = true;
