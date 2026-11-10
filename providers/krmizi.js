@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.21.0
+ * Version: 0.22.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
@@ -18,11 +18,11 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.21.0";
+var VERSION = "0.22.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
-  { name: "Krmizi", bases: ["https://qrmizitv.com", "https://krmzitv.com", "https://www.qrmzi.tv", "https://w3.qrmzi.cyou", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
-  { name: "ShoofLive", bases: ["https://s5.shooflive.cyou", "https://s2.shooflive.cyou", "https://s6.shooflive.cyou", "https://shooflive.net"], index: "/turkish-series/" },
+  { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website", "https://www.qrmzi.tv"], index: "/all-turkish-series/" },
+  { name: "ShoofLive", bases: ["https://s6.shooflive.cyou", "https://s2.shooflive.cyou", "https://shooflive.net", "https://d2.shooflive.sbs"], index: "/turkish-series/" },
   { name: "Qisat", bases: ["https://www.qisat.tv", "https://v2.qisat.sbs", "https://v1.qisat.sbs"], index: "/turkish-series/" }
 ];
 var SITE_BASES = SOURCES[0].bases;
@@ -328,6 +328,8 @@ function episodeNumber(value) {
   if (!match) match = text.match(/\bS\d{1,2}E(\d{1,4})\b/i);
   if (!match) match = text.match(/\bep(?:isode)?[\s._-]*(\d{1,4})\b/i);
   if (!match) match = text.match(/[-_\/]e(\d{1,4})(?:[\/?._-]|$)/i);
+  if (!match) match = text.match(/\b(\d{1,4})\s*[.\-]?\s*b[oö]l[üu]m\b/i);
+  if (!match) match = text.match(/\bb[oö]l[üu]m[\s._-]*(\d{1,4})\b/i);
   return match ? parseInt(match[1], 10) : NaN;
 }
 
@@ -774,7 +776,14 @@ function resolveSeries(metadata, source) {
       });
       remaining.push(nextIndex(firstIndex ? nextIndexPage(firstIndex.html, firstIndex.url, source.index) : "", 1));
       return firstSeries(remaining);
-    }).then(function (series) { return series || nextBase(); });
+    }).then(function (series) {
+      if (series) return series;
+      // A mirror that never served its index is unreachable; one that answered
+      // without this series is reachable but empty for it. Both are named so a
+      // dead host is not guessed from the total duration.
+      logFailure(firstIndex ? "base_no_match" : "base_unreachable", base);
+      return nextBase();
+    });
   }
   return nextBase();
 }
@@ -861,7 +870,17 @@ function findExactEpisode(series, wantedSeason, wantedEpisode) {
       anchor.find("img").first().attr("alt") || "",
       url
     ].join(" ");
-    if (episodeNumber(identity) !== wantedEpisode) return;
+    var number = episodeNumber(identity);
+    if (!number) {
+      var label = anchor.find(".episodeNum").first().text() || "";
+      var labelMatch = label.match(/(\d{1,4})/);
+      if (labelMatch) number = parseInt(labelMatch[1], 10);
+    }
+    if (!number) {
+      var tail = pathKey(url).match(/(?:-|_|\/)(\d{1,4})$/);
+      if (tail) number = parseInt(tail[1], 10);
+    }
+    if (number !== wantedEpisode) return;
     var explicit = explicitSeasonEpisode(identity);
     if (explicit && explicit.season !== wantedSeason) return;
     seen[urlKey(url)] = true;
@@ -875,8 +894,70 @@ function findExactEpisode(series, wantedSeason, wantedEpisode) {
       if (matches[i].explicit && matches[i].explicit.season === wantedSeason) seasonMatches.push(matches[i]);
     }
     if (seasonMatches.length === 1) return seasonMatches[0];
+    if (wantedSeason === 1) {
+      var tailMatches = [];
+      for (var u = 0; u < matches.length; u++) {
+        var tail = pathKey(matches[u].url).match(/(?:-|_)(\d{1,4})$/);
+        if (tail && parseInt(tail[1], 10) === wantedEpisode) tailMatches.push(matches[u]);
+      }
+      if (tailMatches.length === 1) return tailMatches[0];
+    }
   }
   return null;
+}
+
+function findEpisodeViaSearch(series, metadata, request) {
+  var season = request.season, episode = request.episode, origin = originOf(series.url);
+  if (!origin) return Promise.resolve(null);
+  var headings = [], seenHeading = {};
+  function addHeading(value) {
+    var title = String(value || "").replace(/\s+/g, " ").trim();
+    if (!title || seenHeading[title]) return;
+    seenHeading[title] = true; headings.push(title);
+  }
+  addHeading(series.heading);
+  var titles = metadata && metadata.titles || [];
+  for (var t = 0; t < titles.length && headings.length < 3; t++) addHeading(titles[t]);
+  var queries = [], seenQuery = {};
+  for (var h = 0; h < headings.length; h++) {
+    var variants = [headings[h] + " الحلقة " + episode, headings[h] + " " + episode + ". Bölüm"];
+    for (var v = 0; v < variants.length; v++) {
+      if (!seenQuery[variants[v]]) { seenQuery[variants[v]] = true; queries.push(variants[v]); }
+    }
+  }
+  return Promise.all(queries.slice(0, 3).map(function (query) {
+    return fetchTextInfo(origin + "/?s=" + encodeURIComponent(query), series.url, "")
+      .catch(function () { return null; });
+  })).then(function (pages) {
+    var candidates = [], seenUrl = {};
+    for (var p = 0; p < pages.length; p++) {
+      if (!pages[p]) continue;
+      var $ = cheerio.load(pages[p].html);
+      $('a[href*="/episode/"]').each(function (_, element) {
+        if (candidates.length >= 2) return;
+        var anchor = wrap($, element), url = absUrl(anchor.attr("href"), pages[p].url);
+        if (!url || originOf(url) !== origin || seenUrl[urlKey(url)]) return;
+        var identity = [anchor.attr("title") || "", anchor.find(".title").first().text() || "", url].join(" ");
+        var explicit = explicitSeasonEpisode(identity);
+        if (explicit && explicit.season !== season) return;
+        var number = episodeNumber(identity);
+        if (!number) {
+          var tail = pathKey(url).match(/(?:-|_|\/)(\d{1,4})$/);
+          if (tail) number = parseInt(tail[1], 10);
+        }
+        if (number !== episode) return;
+        seenUrl[urlKey(url)] = true;
+        candidates.push({ url: url });
+      });
+    }
+    var index = 0;
+    function next() {
+      if (index >= candidates.length) return Promise.resolve(null);
+      return verifyEpisodePage(series, candidates[index++], season, episode, request)
+        .then(function (verified) { return verified || next(); });
+    }
+    return next();
+  }).catch(function () { return null; });
 }
 
 function anaPlayerAllowed(url) {
@@ -904,7 +985,8 @@ function verifyEpisodePage(series, episodeCandidate, wantedSeason, wantedEpisode
 
     var seriesLink = $("h2 a[href*=\"/series/\"]").first();
     var linkedSeriesUrl = absUrl(seriesLink.attr("href"), result.url);
-    if (!linkedSeriesUrl || urlKey(linkedSeriesUrl) !== urlKey(series.url)) {
+    var linkedKey = urlKey(linkedSeriesUrl), seriesKey = urlKey(series.url);
+    if (!linkedKey || (linkedKey !== seriesKey && linkedKey.indexOf(seriesKey + "/season/") !== 0)) {
       logFailure("episode_identity_mismatch", "series");
       return null;
     }
@@ -1265,7 +1347,12 @@ function addMediaEntry(entry, referer, serverName, streams, seenStreams) {
         if (audio) {
           for (var a = 0; a < verified.length; a++) if (!verified[a]) return;
           return readMediaPlaylist(absUrl(audio[1], result.url), referer).then(function (media) {
-            if (media) add(result.url, "");
+            if (!media) return;
+            var best = "";
+            for (var q = 0; q < verified.length; q++) {
+              if (qualityRank(verified[q].quality) > qualityRank(best)) best = verified[q].quality;
+            }
+            add(result.url, best);
           });
         }
         for (var i = 0; i < verified.length; i++) if (verified[i]) add(verified[i].url, verified[i].quality);
@@ -1312,6 +1399,11 @@ function resolveEmbedTarget(target, expected, streams, seenStreams) {
   if (dailymotionId(url)) {
     return resolveDailymotion(url, target.referer, target.label, streams, seenStreams);
   }
+  if (target.inlineEntries && target.inlineEntries.length) {
+    return Promise.all(target.inlineEntries.map(function (entry) {
+      return addMediaEntry(entry, target.url, target.label, streams, seenStreams);
+    }));
+  }
   if (!supportedDirectEmbed(url)) return Promise.resolve();
 
   return fetchTextInfo(url, target.referer, originOf(target.referer)).then(function (result) {
@@ -1349,6 +1441,13 @@ function resolveAnaPlayer(playerUrl, episodeUrl, wantedSeason, wantedEpisode, id
       var fallbackEmbed = primaryServerEmbed(player.html, player.url);
       if (fallbackEmbed) {
         servers.push({ url: player.url, label: "Main", inlineEmbed: fallbackEmbed });
+      } else {
+        var playerEntries = mediaEntriesFromHtml(player.html);
+        if (playerEntries.length) {
+          return Promise.all(playerEntries.map(function (entry) {
+            return addMediaEntry(entry, player.url, "Main", streams, seenStreams);
+          })).then(function () { return streams; });
+        }
       }
     }
 
@@ -1366,8 +1465,10 @@ function resolveAnaPlayer(playerUrl, episodeUrl, wantedSeason, wantedEpisode, id
         serverJobs.push(
           fetchTextInfo(server.url, player.url, originOf(player.url)).then(function (serverPage) {
             var embed = primaryServerEmbed(serverPage.html, serverPage.url);
-            if (!embed) return null;
-            return { url: embed, label: server.label, referer: serverPage.url };
+            if (embed) return { url: embed, label: server.label, referer: serverPage.url };
+            var entries = mediaEntriesFromHtml(serverPage.html);
+            if (!entries.length) return null;
+            return { url: serverPage.url, label: server.label, referer: serverPage.url, inlineEntries: entries };
           }).catch(function () { return null; })
         );
       })(servers[i]);
@@ -1473,6 +1574,58 @@ function sortStreams(streams) {
   });
 }
 
+function streamCatalogOrder() {
+  var list = SOURCES.concat(typeof EXTRA_SOURCES !== "undefined" ? EXTRA_SOURCES : []), order = {};
+  for (var i = 0; i < list.length; i++) order[list[i].name] = i;
+  return order;
+}
+
+function dedupeStreams(streams) {
+  // Krmizi, 3skNews and ShoofLive (and Qeseh/Qesset) publish the same player
+  // path with a different token. One playback URL is enough: keep its best
+  // labelled copy and the combined catalog names. A real path difference is
+  // never merged.
+  var list = streams || [], order = [], byKey = {}, labels = {}, catalog = streamCatalogOrder();
+  for (var i = 0; i < list.length; i++) {
+    var stream = list[i];
+    if (!stream || !stream.url) continue;
+    var key = pathKey(stream.url) || urlKey(stream.url);
+    if (!key) continue;
+    var current = byKey[key];
+    if (!current) {
+      byKey[key] = stream;
+      labels[key] = [];
+      order.push(key);
+    } else if (qualityRank(stream.quality || "") > qualityRank(current.quality || "")) {
+      byKey[key] = stream;
+    }
+    var label = String(stream.provider || "").trim();
+    if (label && labels[key].indexOf(label) === -1) labels[key].push(label);
+  }
+  for (var o = 0; o < order.length; o++) {
+    var names = labels[order[o]];
+    if (names && names.length > 1) {
+      // Declaration order, not resolution order, so a merged label is stable.
+      names.sort(function (left, right) {
+        var leftRank = catalog.hasOwnProperty(left) ? catalog[left] : 999;
+        var rightRank = catalog.hasOwnProperty(right) ? catalog[right] : 999;
+        return leftRank - rightRank;
+      });
+    }
+  }
+  var merged = [];
+  for (var k = 0; k < order.length; k++) {
+    var kept = byKey[order[k]], names = labels[order[k]];
+    if (names && names.length > 1) {
+      var joined = names.join(" · ");
+      kept.name = joined;
+      kept.title = joined + (kept.quality ? " • " + kept.quality : "");
+    }
+    merged.push(kept);
+  }
+  return merged;
+}
+
 function arabicOnlyStreams(streams) {
   // Arabic translation is a hard requirement for this provider. Original
   // Turkish catalogs are not registered; this guard also keeps a future
@@ -1500,23 +1653,34 @@ var EXTRA_SOURCES = [
   { name: "3ick", bases: ["https://ww4.3ick.club", "https://3iskk.xyz"], strategy: "extra", search: "3ick", language: "ar" }
 ];
 
+// The catalog prints its next numbered mirror whether or not that host
+// resolves. Every candidate path is therefore anchored on the live mirror.
+var THREEICK_LIVE_MIRROR = "https://ww4.3ick.club";
+
 function threeickCatalogAllowed(url) {
   return /^https:\/\/ww\d+\.3ick\.club$/i.test(originOf(url));
+}
+
+function threeickLiveUrl(url) {
+  if (!threeickCatalogAllowed(url)) return "";
+  var origin = originOf(url);
+  if (origin === THREEICK_LIVE_MIRROR) return "";
+  return THREEICK_LIVE_MIRROR + url.substring(origin.length);
 }
 
 function threeickOwnedUrl(value, pageUrl) {
   var url = absUrl(value, pageUrl);
   if (!url || !threeickCatalogAllowed(url) || !threeickCatalogAllowed(pageUrl)) return "";
-  // The live catalog prints episode links under its next numbered mirror.
-  // Keep only its page-owned path, on the currently reachable catalog mirror.
-  return originOf(pageUrl) + url.substring(originOf(url).length);
+  // Ownership is unchanged: the link must be a numbered catalog host with a
+  // page-owned path. A non-live numbered host is answered by the live mirror.
+  var origin = originOf(pageUrl);
+  return (origin === THREEICK_LIVE_MIRROR ? origin : THREEICK_LIVE_MIRROR) + url.substring(originOf(url).length);
 }
 
 function threeickSession() {
   var cookies = {};
-  function get(url, referer, redirects) {
-    var origin = originOf(url), seed = origin === "https://3iskk.xyz";
-    if (!threeickCatalogAllowed(url) && !seed) return Promise.reject(new Error("3ick_unowned_catalog"));
+  function attempt(url, referer, redirects) {
+    var origin = originOf(url);
     var headers = requestHeaders(referer, "");
     if (cookies[origin]) headers.Cookie = cookies[origin];
     var work = fetch(url,{headers:headers,redirect:"manual",skipSizeCheck:true}).then(function(response) {
@@ -1540,6 +1704,19 @@ function threeickSession() {
       });
     });
     return withDeadline(work,6000,"3ick_catalog_timeout");
+  }
+  function get(url, referer, redirects) {
+    var origin = originOf(url), seed = origin === "https://3iskk.xyz";
+    if (!threeickCatalogAllowed(url) && !seed) return Promise.reject(new Error("3ick_unowned_catalog"));
+    var work = attempt(url, referer, redirects);
+    // A numbered mirror can stop resolving (DNS/TLS) while the catalog keeps
+    // printing it. The same path is retried once on the live mirror.
+    return withDeadline(work.catch(function (error) {
+      var live = threeickLiveUrl(url);
+      if (!live) throw error;
+      logFailure("3ick_mirror_retry", origin + " -> " + THREEICK_LIVE_MIRROR);
+      return attempt(live, referer, redirects);
+    }),6000,"3ick_catalog_timeout");
   }
   return {get:get};
 }
@@ -2803,7 +2980,11 @@ function getStreams(tmdbId, mediaType, season, episode) {
               if (index >= requests.length) return Promise.resolve([]);
               var request = requests[index++];
               var candidate = findExactEpisode(series, request.season, request.episode);
-              if (!candidate) return nextEpisode();
+              if (!candidate) {
+                return findEpisodeViaSearch(series, metadata, request).then(function (verified) {
+                  return verified ? resolvePlayer(verified) : nextEpisode();
+                });
+              }
               return verifyEpisodePage(series, candidate, request.season, request.episode, request).then(function (verified) {
                 return verified ? resolvePlayer(verified) : [];
               }).catch(function () { return []; }).then(function (streams) {
@@ -2817,7 +2998,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
         }
         return nextMirror();
       });
-      return withDeadline(work, 32000, "source_timeout " + source.name).catch(function (error) {
+      return withDeadline(work, 18000, "source_timeout " + source.name).catch(function (error) {
         logFailure("source_failed", source.name + " " + errorMessage(error).replace(/api_key=[^&\s]+/gi, "api_key=REDACTED"));
         return [];
       }).then(function (streams) {
@@ -2831,12 +3012,12 @@ function getStreams(tmdbId, mediaType, season, episode) {
         return streams;
       });
     });
-    return Promise.all(jobs).then(function () { return sortStreams(collected); });
+    return Promise.all(jobs).then(function () { return sortStreams(dedupeStreams(collected)); });
   });
-  return withDeadline(pipeline, 50000, "provider_timeout").catch(function () {
+  return withDeadline(pipeline, 24000, "provider_timeout").catch(function () {
     // Keep completed sources when one network never settles before Nuvio's
     // host execution limit. Each source already has its own shorter deadline.
-    return sortStreams(collected);
+    return sortStreams(dedupeStreams(collected));
   }).then(function (streams) {
     streams = arabicOnlyStreams(streams);
     log("streams_found", streams.length);

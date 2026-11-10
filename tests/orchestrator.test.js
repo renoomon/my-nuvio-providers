@@ -55,7 +55,7 @@ test('one never-settling source times out without discarding a verified working 
   let settled=false;
   const result=ctx.module.exports.getStreams('123','tv',2,1).then(streams=>{settled=true;return streams;});
   await flush();assert(run.calls.some(call=>call.url===mediaUrl(17)));assert.equal(settled,false);
-  run.advance(31999);await flush();assert.equal(settled,false);
+  run.advance(17999);await flush();assert.equal(settled,false);
   run.advance(1);const streams=await result;
   assert.equal(streams.length,1);assert.equal(streams[0].provider,'ShoofLive');assert.equal(streams[0].url,mediaUrl(17));
   assert(run.logs.some(line=>line.includes('source_timeout Stalled')));assert.equal(run.timers.size,0);

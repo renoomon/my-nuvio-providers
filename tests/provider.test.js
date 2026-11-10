@@ -31,7 +31,7 @@ function runtime(fetch, globals = {}) {
 const response = (body, url, status = 200, contentType = '') => ({ ok: status >= 200 && status < 300,
   status, url, headers: { get: name => name.toLowerCase()==='content-type' ? contentType : null },
   text: () => Promise.resolve(typeof body === 'string' ? body : JSON.stringify(body)) });
-const base = 'https://s5.shooflive.cyou';
+const base = 'https://s6.shooflive.cyou';
 const seriesUrl = base + '/series/yeralti/';
 const episodeUrl = n => base + '/episode/yeralti-' + n + '/';
 const playerUrl = n => 'https://shooof.site/albaplayer/yeralti-2026-s01e' + n;
@@ -58,7 +58,7 @@ function network({ primary = false, emptyPrimary = false, third = false } = {}) 
   return (url, opts) => {
     if (url.startsWith('https://api.themoviedb.org/3/')) return response({ name: 'تحت الأرض', original_name: 'Yeraltı', seasons: [{season_number:1, episode_count:16},{season_number:2,episode_count:2}] }, url);
     if (url.startsWith('https://www.themoviedb.org/')) throw Error('HTML metadata must not be fetched with an injected key');
-    const source = third ? 'https://www.qisat.tv' : primary || emptyPrimary ? 'https://www.qrmzi.tv' : base;
+    const source = third ? 'https://www.qisat.tv' : primary || emptyPrimary ? 'https://www.qrmzi.tv' : (url.startsWith(base) ? base : '');
     if (url.startsWith(source + '/?s=')) return response(searchHtml.replaceAll(base, source), url);
     if (url === seriesUrl.replace(base, source)) return response(seriesHtml.replaceAll(base, source), url);
     if (url.startsWith(source + '/episode/')) {
@@ -108,7 +108,7 @@ test('Qisat results survive when the other sources fail', async () => {
   const streams = await ctx.module.exports.getStreams('123','tv',2,2);
   assert.equal(streams[0].provider,'Qisat');
 });
-test('combines results from all three successful sources and keeps their names', async () => {
+test('three catalogs that share one player path merge into one named entry', async () => {
   const primary=network({primary:true}), backup=network(), third=network({third:true});
   const {ctx,calls}=runtime((url, opts) => {
     if (url.startsWith('https://www.qrmzi.tv')) return primary(url,opts);
@@ -116,14 +116,15 @@ test('combines results from all three successful sources and keeps their names',
     return backup(url,opts);
   }, {TMDB_API_KEY:'test-key'});
   const streams=await ctx.module.exports.getStreams('123','tv',2,1);
-  assert.equal(streams.length,6);
-  assert.deepEqual([...new Set(streams.map(s=>s.provider))].sort(), ['Krmizi','Qisat','ShoofLive']);
-  for (const name of ['Krmizi','ShoofLive','Qisat']) {
-    const owned=streams.filter(s=>s.provider===name);
-    assert.equal(owned.length,2);
-    assert(owned.every(s=>s.name.startsWith(name + " • ") && s.title.startsWith(name)));
+  // Every catalog was searched; the three of them resolve the same two master
+  // variants, so the duplicate playback paths collapse to one entry each.
+  for (const origin of ['https://www.qrmzi.tv','https://s6.shooflive.cyou','https://www.qisat.tv']) {
+    assert(calls.some(u=>u.startsWith(origin)));
   }
-  assert.deepEqual(Array.from(streams,s=>s.quality),['1080p','1080p','1080p','360p','360p','360p']);
+  assert.equal(streams.length,2);
+  assert.deepEqual(Array.from(streams,s=>s.quality),['1080p','360p']);
+  assert.deepEqual(Array.from(streams,s=>s.name),['Krmizi · ShoofLive · Qisat','Krmizi · ShoofLive · Qisat']);
+  assert(streams.every(s=>s.title.startsWith('Krmizi · ShoofLive · Qisat')));
   assert.equal(calls.filter(u=>u.includes('api.themoviedb.org')).length,3);
 });
 test('a rejected source cannot discard successful results from the other two', async () => {
@@ -132,8 +133,11 @@ test('a rejected source cannot discard successful results from the other two', a
   const resolve=ctx.resolveSeries;
   ctx.resolveSeries=(metadata,source)=>source.name==='Krmizi'?Promise.reject(Error('source unavailable')):resolve(metadata,source);
   const streams=await ctx.module.exports.getStreams('123','tv',2,2);
-  assert.equal(streams.length,4);
-  assert.deepEqual([...new Set(streams.map(s=>s.provider))].sort(),['Qisat','ShoofLive']);
+  // Two surviving catalogs share the same player paths, so one entry per
+  // variant remains and it names both of them.
+  assert.equal(streams.length,2);
+  assert(streams.every(s=>s.name==='ShoofLive · Qisat'));
+  assert.deepEqual(Array.from(streams,s=>s.quality),['1080p','360p']);
 });
 test('all sources are started before a pending source completes', async () => {
   const {ctx}=runtime(network(),{TMDB_API_KEY:'test-key'});
@@ -223,9 +227,10 @@ test('metadata HTML fallback remains available without a runtime key', async () 
 
 test('captured ShoofLive HTML resolves the actual episode 18 and current player', async () => {
   const fixture = name => fs.readFileSync(__dirname+'/fixtures/shoof-'+name+'.html','utf8');
-  const actualSeries=base+'/series/%d9%85%d8%b3%d9%84%d8%b3%d9%84-%d8%aa%d8%ad%d8%aa-%d8%a7%d9%84%d8%a7%d8%b1%d8%b6/';
+  const recorded='https://s5.shooflive.cyou';
+  const actualSeries=recorded+'/series/%d9%85%d8%b3%d9%84%d8%b3%d9%84-%d8%aa%d8%ad%d8%aa-%d8%a7%d9%84%d8%a7%d8%b1%d8%b6/';
   const {ctx}=runtime(url=>response(fixture('episode'),url));
-  const cards=ctx.parseSeriesCards(fixture('search'),base+'/?s=title',['تحت الأرض']);
+  const cards=ctx.parseSeriesCards(fixture('search'),recorded+'/?s=title',['تحت الأرض']);
   assert.equal(cards[0].url,actualSeries);
   const series={url:actualSeries,html:fixture('series')};
   const request=ctx.siteEpisodeRequest(series,{},2,2);assert.equal(request.episode,18);

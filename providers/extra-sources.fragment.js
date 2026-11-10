@@ -15,23 +15,34 @@ var EXTRA_SOURCES = [
   { name: "3ick", bases: ["https://ww4.3ick.club", "https://3iskk.xyz"], strategy: "extra", search: "3ick", language: "ar" }
 ];
 
+// The catalog prints its next numbered mirror whether or not that host
+// resolves. Every candidate path is therefore anchored on the live mirror.
+var THREEICK_LIVE_MIRROR = "https://ww4.3ick.club";
+
 function threeickCatalogAllowed(url) {
   return /^https:\/\/ww\d+\.3ick\.club$/i.test(originOf(url));
+}
+
+function threeickLiveUrl(url) {
+  if (!threeickCatalogAllowed(url)) return "";
+  var origin = originOf(url);
+  if (origin === THREEICK_LIVE_MIRROR) return "";
+  return THREEICK_LIVE_MIRROR + url.substring(origin.length);
 }
 
 function threeickOwnedUrl(value, pageUrl) {
   var url = absUrl(value, pageUrl);
   if (!url || !threeickCatalogAllowed(url) || !threeickCatalogAllowed(pageUrl)) return "";
-  // The live catalog prints episode links under its next numbered mirror.
-  // Keep only its page-owned path, on the currently reachable catalog mirror.
-  return originOf(pageUrl) + url.substring(originOf(url).length);
+  // Ownership is unchanged: the link must be a numbered catalog host with a
+  // page-owned path. A non-live numbered host is answered by the live mirror.
+  var origin = originOf(pageUrl);
+  return (origin === THREEICK_LIVE_MIRROR ? origin : THREEICK_LIVE_MIRROR) + url.substring(originOf(url).length);
 }
 
 function threeickSession() {
   var cookies = {};
-  function get(url, referer, redirects) {
-    var origin = originOf(url), seed = origin === "https://3iskk.xyz";
-    if (!threeickCatalogAllowed(url) && !seed) return Promise.reject(new Error("3ick_unowned_catalog"));
+  function attempt(url, referer, redirects) {
+    var origin = originOf(url);
     var headers = requestHeaders(referer, "");
     if (cookies[origin]) headers.Cookie = cookies[origin];
     var work = fetch(url,{headers:headers,redirect:"manual",skipSizeCheck:true}).then(function(response) {
@@ -55,6 +66,19 @@ function threeickSession() {
       });
     });
     return withDeadline(work,6000,"3ick_catalog_timeout");
+  }
+  function get(url, referer, redirects) {
+    var origin = originOf(url), seed = origin === "https://3iskk.xyz";
+    if (!threeickCatalogAllowed(url) && !seed) return Promise.reject(new Error("3ick_unowned_catalog"));
+    var work = attempt(url, referer, redirects);
+    // A numbered mirror can stop resolving (DNS/TLS) while the catalog keeps
+    // printing it. The same path is retried once on the live mirror.
+    return withDeadline(work.catch(function (error) {
+      var live = threeickLiveUrl(url);
+      if (!live) throw error;
+      logFailure("3ick_mirror_retry", origin + " -> " + THREEICK_LIVE_MIRROR);
+      return attempt(live, referer, redirects);
+    }),6000,"3ick_catalog_timeout");
   }
   return {get:get};
 }
@@ -1009,7 +1033,7 @@ function dailymotionArabicCandidate(video, metadata, requests) {
   var title = String(video && video.title || ""), description = String(video && video.description || "");
   var evidence = title + " " + description;
   if (/مدبلج|dublaj|dubbed|english[\s_-]*(?:sub|subtitle)|eng[\s_-]*sub|ترجم[ةه]\s+انجليزي/i.test(evidence)) return null;
-  if (/اعلان|إعلان|ملخص|مقطع|trailer|fragman|teaser|promo/i.test(title) || !(Number(video.duration) >= 1200)) return null;
+  if (/اعلان|إعلان|ملخص|مقطع|trailer|fragman|teaser|promo/i.test(title) || Number(video.duration) < 1200) return null;
   // A search query does not establish the language of its results. In
   // particular Dailymotion returns "Ezel English Sub" to Arabic queries.
   var arabicClaim = /(?:arabic[\s_-]*(?:sub|subtitle)|(?:sub|subtitle)[\s_-]*arabic|بالعربي[ةه]?|ترجم[ةه]\s+عربي[ةه]?)/i.test(evidence) ||

@@ -130,6 +130,17 @@ test('3ick mirror normalization is limited to its numbered HTTPS catalog hosts',
  const c=setup();assert.equal(c.threeickOwnedUrl('https://ww5.3ick.club/watch/episodes/owned/','https://ww4.3ick.club/'),'https://ww4.3ick.club/watch/episodes/owned/');
  for(const url of ['https://3ick.club.ad.test/watch/episodes/owned/','https://evil.test/watch/episodes/owned/','http://ww5.3ick.club/watch/episodes/owned/'])assert.equal(c.threeickOwnedUrl(url,'https://ww4.3ick.club/'),'');
 });
+test('a numbered 3ick mirror that stops resolving is retried on the live mirror',async()=>{
+ const c=setup(),calls=[],live='https://ww4.3ick.club',path='/watch/episodes/owned/';
+ c.fetch=async url=>{calls.push(url);if(url.startsWith('https://ww5.3ick.club'))throw Error('getaddrinfo ENOTFOUND ww5.3ick.club');
+  return {ok:true,status:200,url,headers:{get:()=>null},text:async()=>'<h1>public</h1>'};};
+ const page=await c.threeickSession().get('https://ww5.3ick.club'+path,'');
+ assert.deepEqual(calls,['https://ww5.3ick.club'+path,live+path]);
+ assert.equal(page.url,live+path);
+ assert.equal(c.threeickLiveUrl('https://ww5.3ick.club'+path),live+path);
+ assert.equal(c.threeickLiveUrl(live+path),'');
+ assert.equal(c.threeickLiveUrl('https://miravd.com/embed-owned.html'),'');
+});
 test('3ick rejects dubbed cuts and substring titles before resolving a player',()=>{
  const c=setup();assert.equal(c.threeickTitleMatches('<h1>مسلسل اصطدام مترجم قصة عشق الاصلي HD</h1>',{titles:['اصطدام']}),true);
  assert.equal(c.threeickTitleMatches('<h1>مسلسل اصطدام مدبلج قصة عشق الاصلي HD</h1>',{titles:['اصطدام']}),false);
