@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.25.0
+ * Version: 0.26.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
@@ -18,16 +18,16 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.25.0";
+var VERSION = "0.26.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
   { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
   { name: "ShoofLive", bases: ["https://s6.shooflive.cyou", "https://s2.shooflive.cyou"], index: "/turkish-series/" }
 ];
 var SITE_BASES = SOURCES[0].bases;
-var MAX_INDEX_PAGES = 6;
+var MAX_INDEX_PAGES = 3;
 var UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-var MAX_SERIES_PROBES = 6;
+var MAX_SERIES_PROBES = 4;
 var MAX_SERVERS = 8;
 
 function log(key, value) {
@@ -179,7 +179,36 @@ function withDeadline(promise, ms, errorMessage) {
   });
 }
 
+/* Television runtimes provide no setTimeout, so every promise deadline here
+ * becomes a no-op and a hung socket would swallow the whole result. Bound the
+ * work with counters and a wall clock that only needs Date.now(): a hard cap of
+ * requests per call, per source and per host, plus a fixed time budget.
+ */
+var REQUEST_BUDGET = null;
+var REQUEST_LIMITS = { total: 90, source: 20, host: 24 };
+
+function resetRequestBudget(budgetMs) {
+  REQUEST_BUDGET = { total: 0, hosts: {}, startedAt: Date.now(), deadlineAt: Date.now() + (budgetMs || 8000) };
+}
+
+function budgetAllows(url) {
+  if (!REQUEST_BUDGET) return true;
+  if (Date.now() > REQUEST_BUDGET.deadlineAt) return false;
+  if (REQUEST_BUDGET.total >= REQUEST_LIMITS.total) return false;
+  var host = originOf(url);
+  var used = REQUEST_BUDGET.hosts[host] || 0;
+  if (used >= REQUEST_LIMITS.host) return false;
+  REQUEST_BUDGET.total++;
+  REQUEST_BUDGET.hosts[host] = used + 1;
+  return true;
+}
+
+function budgetExpired() {
+  return !!(REQUEST_BUDGET && Date.now() > REQUEST_BUDGET.deadlineAt);
+}
+
 function fetchTextInfo(url, referer, origin, accept) {
+  if (!budgetAllows(url)) return Promise.reject(new Error("budget_exceeded " + url));
   var work = Promise.resolve().then(function () {
     return fetch(url, {
       headers: requestHeaders(referer, origin, accept),
@@ -3020,6 +3049,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
 
   log("tmdb_id", id);
   log("request", "S" + wantedSeason + "E" + wantedEpisode);
+  resetRequestBudget(8000);
 
   var collected = [];
   var pipeline = getTmdbMetadata(id).then(function (metadata) {
@@ -3045,7 +3075,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
         // when this mirror lacks the episode or its player has disappeared.
         var mirrorIndex = 0, mirrors = source.bases || [null];
         function nextMirror() {
-          if (mirrorIndex >= mirrors.length) return Promise.resolve([]);
+          if (mirrorIndex >= mirrors.length || budgetExpired()) return Promise.resolve([]);
           var mirror = mirrors[mirrorIndex++];
           var candidateSource = mirror ? { name: source.name, bases: [mirror], index: source.index } : source;
           return resolveSeries(metadata, candidateSource).then(function (series) {
@@ -3053,7 +3083,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
             log("matched_series", series.url);
             var requests = siteEpisodeRequests(series, metadata, wantedSeason, wantedEpisode), index = 0;
             function nextEpisode() {
-              if (index >= requests.length) return Promise.resolve([]);
+              if (index >= requests.length || budgetExpired()) return Promise.resolve([]);
               var request = requests[index++];
               var candidate = findExactEpisode(series, request.season, request.episode);
               if (!candidate) {

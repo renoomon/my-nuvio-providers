@@ -13,10 +13,10 @@ https://raw.githubusercontent.com/renoomon/my-nuvio-providers/refs/heads/main/ma
 رابط تحديث مباشر إلى آخر إصدار، ويعرض اسم ملف المزود بإصداره الجديد لتجاوز أي نسخة مخزنة مؤقتًا:
 
 ```text
-https://raw.githubusercontent.com/renoomon/my-nuvio-providers/refs/heads/main/manifest.json?v=0.25.0
+https://raw.githubusercontent.com/renoomon/my-nuvio-providers/refs/heads/main/manifest.json?v=0.26.0
 ```
 
-إصدار المستودع **1.22.0**، وإصدار المزود **0.25.0**، واسمه **Turkish Sources | مسلسلات تركية**. أغلق صفحة المسلسل وافتحها مجددًا بعد التحديث.
+إصدار المستودع **1.23.0**، وإصدار المزود **0.26.0**، واسمه **Turkish Sources | مسلسلات تركية**. أغلق صفحة المسلسل وافتحها مجددًا بعد التحديث.
 
 ## المصادر
 
@@ -134,7 +134,7 @@ pnpm test
 
 كل النتائج المعادة الآن عربية وتُعرض بلغة **ar**. يتغير عدد الروابط بحسب استجابة المواقع؛ استعادة هذه الحالات لا تعني توفر ترجمة عربية لكل مسلسل أو حلقة.
 
-عند الإبلاغ عن مشكلة، أرفق TMDB ID والموسم والحلقة وسجل `[Krmizi v0.25.0]` وإصدار Nuvio.
+عند الإبلاغ عن مشكلة، أرفق TMDB ID والموسم والحلقة وسجل `[Krmizi v0.26.0]` وإصدار Nuvio.
 
 
 في الإصدار **0.21.0** بتاريخ 18 أكتوبر 2026:
