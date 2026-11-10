@@ -9,7 +9,7 @@ const archivePath=require.resolve('../providers/krmizi-archive.js');
 const {generate}=require('../scripts/build-profiles.js');
 
 const FAST=['Qeseh','3ick'];
-const ARCHIVE=['Krmizi','ShoofLive','3skNews','Qesset','FaselHD','Dailymotion'];
+const ARCHIVE=['Krmizi','ShoofLive','3skNews','FaselHD','Dailymotion'];
 
 function runtime() {
   const ctx={module:{exports:{}},require:name=>{assert.equal(name,'cheerio-without-node-native');return cheerio;},

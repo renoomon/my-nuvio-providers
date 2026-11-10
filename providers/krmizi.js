@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.27.0
+ * Version: 0.28.0
  * Profile: fast
  *
  * Accuracy-first flow:
@@ -19,7 +19,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.27.0";
+var VERSION = "0.28.0";
 // Which half of the catalogs this build searches. scripts/build-profiles.js
 // copies this file and flips the next line to "archive" for krmizi-archive.js.
 var SOURCE_PROFILE = "fast";
@@ -1758,7 +1758,6 @@ function arabicOnlyStreams(streams) {
 var EXTRA_SOURCES = [
   { name: "3skNews", bases: ["https://f1.q3sk.monster"], strategy: "extra", language: "ar", profile: "archive" },
   { name: "Qeseh", bases: ["https://wwv.qeseh.com"], strategy: "extra", search: "qeseh", language: "ar", profile: "fast" },
-  { name: "Qesset", bases: ["https://qesset.com", "https://www.qesset.com"], strategy: "extra", search: "qeseh", language: "ar", profile: "archive" },
   { name: "FaselHD", bases: ["https://faselhd.watch"], strategy: "extra", search: "faselhd", language: "ar", profile: "archive" },
   { name: "Dailymotion", bases: ["https://www.dailymotion.com"], strategy: "extra", search: "dailymotion", language: "ar", profile: "archive" },
   { name: "3ick", bases: ["https://ww4.3ick.club"], strategy: "extra", search: "3ick", language: "ar", profile: "fast" }
