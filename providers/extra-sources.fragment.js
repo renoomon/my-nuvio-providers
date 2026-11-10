@@ -6,13 +6,12 @@
 // TVDiziler) were removed in 0.15.0 because they cannot provide Arabic
 // translation; this provider returns Arabic-tagged streams only.
 var EXTRA_SOURCES = [
-  { name: "3skNews", bases: ["https://q.3sk.news", "https://f1.q3sk.monster"], strategy: "extra", language: "ar" },
+  { name: "3skNews", bases: ["https://f1.q3sk.monster"], strategy: "extra", language: "ar" },
   { name: "Qeseh", bases: ["https://wwv.qeseh.com"], strategy: "extra", search: "qeseh", language: "ar" },
   { name: "Qesset", bases: ["https://qesset.com", "https://www.qesset.com"], strategy: "extra", search: "qeseh", language: "ar" },
-  { name: "FaselHD", bases: ["https://faselhd.watch", "https://faselhd.channel"], strategy: "extra", search: "faselhd", language: "ar" },
+  { name: "FaselHD", bases: ["https://faselhd.watch"], strategy: "extra", search: "faselhd", language: "ar" },
   { name: "Dailymotion", bases: ["https://www.dailymotion.com"], strategy: "extra", search: "dailymotion", language: "ar" },
-  { name: "Shahid4U", bases: ["https://sh4u.buzz"], strategy: "extra", search: "php", language: "ar" },
-  { name: "3ick", bases: ["https://ww4.3ick.club", "https://3iskk.xyz"], strategy: "extra", search: "3ick", language: "ar" }
+  { name: "3ick", bases: ["https://ww4.3ick.club"], strategy: "extra", search: "3ick", language: "ar" }
 ];
 
 // The catalog prints its next numbered mirror whether or not that host

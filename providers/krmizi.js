@@ -1,12 +1,12 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.22.0
+ * Version: 0.23.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
  * series page -> exact episode inside that page -> page-owned player ->
  * AlbaPlayer servers for that episode only -> public HLS/MP4 sources.
- * Search Krmizi, ShoofLive and Qisat independently; combine every source result.
+ * Search Krmizi, ShoofLive and every extra catalog independently; combine every source result.
  * Arabic translation is required: only Arabic-tagged streams are returned, and
  * the original-Turkish catalogs NOW, DDizi and TVDiziler are not registered.
  *
@@ -18,12 +18,11 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.22.0";
+var VERSION = "0.23.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
-  { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website", "https://www.qrmzi.tv"], index: "/all-turkish-series/" },
-  { name: "ShoofLive", bases: ["https://s6.shooflive.cyou", "https://s2.shooflive.cyou", "https://shooflive.net", "https://d2.shooflive.sbs"], index: "/turkish-series/" },
-  { name: "Qisat", bases: ["https://www.qisat.tv", "https://v2.qisat.sbs", "https://v1.qisat.sbs"], index: "/turkish-series/" }
+  { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
+  { name: "ShoofLive", bases: ["https://s6.shooflive.cyou", "https://s2.shooflive.cyou"], index: "/turkish-series/" }
 ];
 var SITE_BASES = SOURCES[0].bases;
 var MAX_INDEX_PAGES = 6;
@@ -1644,13 +1643,12 @@ function arabicOnlyStreams(streams) {
 // TVDiziler) were removed in 0.15.0 because they cannot provide Arabic
 // translation; this provider returns Arabic-tagged streams only.
 var EXTRA_SOURCES = [
-  { name: "3skNews", bases: ["https://q.3sk.news", "https://f1.q3sk.monster"], strategy: "extra", language: "ar" },
+  { name: "3skNews", bases: ["https://f1.q3sk.monster"], strategy: "extra", language: "ar" },
   { name: "Qeseh", bases: ["https://wwv.qeseh.com"], strategy: "extra", search: "qeseh", language: "ar" },
   { name: "Qesset", bases: ["https://qesset.com", "https://www.qesset.com"], strategy: "extra", search: "qeseh", language: "ar" },
-  { name: "FaselHD", bases: ["https://faselhd.watch", "https://faselhd.channel"], strategy: "extra", search: "faselhd", language: "ar" },
+  { name: "FaselHD", bases: ["https://faselhd.watch"], strategy: "extra", search: "faselhd", language: "ar" },
   { name: "Dailymotion", bases: ["https://www.dailymotion.com"], strategy: "extra", search: "dailymotion", language: "ar" },
-  { name: "Shahid4U", bases: ["https://sh4u.buzz"], strategy: "extra", search: "php", language: "ar" },
-  { name: "3ick", bases: ["https://ww4.3ick.club", "https://3iskk.xyz"], strategy: "extra", search: "3ick", language: "ar" }
+  { name: "3ick", bases: ["https://ww4.3ick.club"], strategy: "extra", search: "3ick", language: "ar" }
 ];
 
 // The catalog prints its next numbered mirror whether or not that host

@@ -28,6 +28,15 @@ function runtime(fetch, globals = {}) {
   vm.runInNewContext(code, ctx);ctx.EXTRA_SOURCES=[];
   return { ctx, calls, logs };
 }
+// Three live-shaped catalogs, pinned here so the orchestration contracts stay
+// tested even when the shipped catalog list changes.
+function definitions() {
+  return [
+    { name: 'Krmizi', bases: ['https://www.qrmzi.tv'], index: '/turkish-series/' },
+    { name: 'ShoofLive', bases: [base], index: '/turkish-series/' },
+    { name: 'Qisat', bases: ['https://www.qisat.tv'], index: '/turkish-series/' }
+  ];
+}
 const response = (body, url, status = 200, contentType = '') => ({ ok: status >= 200 && status < 300,
   status, url, headers: { get: name => name.toLowerCase()==='content-type' ? contentType : null },
   text: () => Promise.resolve(typeof body === 'string' ? body : JSON.stringify(body)) });
@@ -76,6 +85,7 @@ function network({ primary = false, emptyPrimary = false, third = false } = {}) 
 test('S2E1 and S2E2 map to 17 and 18 while all sources are searched', async () => {
   for (const episode of [1,2]) {
     const {ctx,calls} = runtime(network(), { TMDB_API_KEY: 'test-key' });
+    ctx.SOURCES = definitions();
     const streams = await ctx.module.exports.getStreams('123', 'tv', 2, episode);
     assert.equal(streams.length, 2);
     assert.equal(streams[0].quality, '1080p');
@@ -88,8 +98,9 @@ test('S2E1 and S2E2 map to 17 and 18 while all sources are searched', async () =
 });
 test('a working primary source does not stop the other searches', async () => {
   const {ctx,calls} = runtime(network({primary:true}), { TMDB_API_KEY: 'test-key' });
+  ctx.SOURCES = definitions();
   const streams = await ctx.module.exports.getStreams('123','tv',2,1);
-  assert.equal(streams[0].provider, 'Krmizi');
+  assert(/^Krmizi\b/.test(streams[0].provider));
   assert(calls.some(u => u.startsWith(base)));
   assert(calls.some(u => u.startsWith('https://www.qisat.tv')));
 });
@@ -103,10 +114,16 @@ test('primary with no media does not remove ShoofLive results', async () => {
   assert.equal(streams[0].provider, 'ShoofLive');
   assert(calls.some(u => u.startsWith(base)));
 });
-test('Qisat results survive when the other sources fail', async () => {
+test('a failing catalog cannot hide the results of the others', async () => {
   const {ctx} = runtime(network({third:true}), {TMDB_API_KEY:'test-key'});
+  ctx.SOURCES = definitions();
+  const resolve = ctx.resolveSeries;
+  ctx.resolveSeries = (metadata, source) => source.name === 'Krmizi' ? Promise.reject(Error('source unavailable')) : resolve(metadata, source);
   const streams = await ctx.module.exports.getStreams('123','tv',2,2);
-  assert.equal(streams[0].provider,'Qisat');
+  // The two surviving catalogs share the same player paths, so one entry per
+  // variant remains and it names both of them.
+  assert(streams.length > 0);
+  assert(streams.every(s => !/^Krmizi\b/.test(s.provider)));
 });
 test('three catalogs that share one player path merge into one named entry', async () => {
   const primary=network({primary:true}), backup=network(), third=network({third:true});
@@ -115,6 +132,7 @@ test('three catalogs that share one player path merge into one named entry', asy
     if (url.startsWith('https://www.qisat.tv')) return third(url,opts);
     return backup(url,opts);
   }, {TMDB_API_KEY:'test-key'});
+  ctx.SOURCES = definitions();
   const streams=await ctx.module.exports.getStreams('123','tv',2,1);
   // Every catalog was searched; the three of them resolve the same two master
   // variants, so the duplicate playback paths collapse to one entry each.
@@ -130,6 +148,7 @@ test('three catalogs that share one player path merge into one named entry', asy
 test('a rejected source cannot discard successful results from the other two', async () => {
   const backup=network(), third=network({third:true});
   const {ctx}=runtime((url,opts)=>url.startsWith('https://www.qisat.tv')?third(url,opts):backup(url,opts),{TMDB_API_KEY:'test-key'});
+  ctx.SOURCES = definitions();
   const resolve=ctx.resolveSeries;
   ctx.resolveSeries=(metadata,source)=>source.name==='Krmizi'?Promise.reject(Error('source unavailable')):resolve(metadata,source);
   const streams=await ctx.module.exports.getStreams('123','tv',2,2);
@@ -141,6 +160,7 @@ test('a rejected source cannot discard successful results from the other two', a
 });
 test('all sources are started before a pending source completes', async () => {
   const {ctx}=runtime(network(),{TMDB_API_KEY:'test-key'});
+  ctx.SOURCES = definitions();
   const started=[];
   let release;
   const pending=new Promise(resolve=>{release=resolve;});

@@ -10,8 +10,8 @@ const metadata={titles:['تحت الأرض','Yeraltı'],year:2026};
 
 test('only the ten Arabic-translated catalogs are registered',()=>{
  const c=setup();
- assert.deepEqual(Array.from(c.SOURCES,s=>s.name).sort(),['Krmizi','Qisat','ShoofLive']);
- assert.deepEqual(Array.from(c.EXTRA_SOURCES,s=>s.name).sort(),['3ick','3skNews','Dailymotion','FaselHD','Qeseh','Qesset','Shahid4U']);
+ assert.deepEqual(Array.from(c.SOURCES,s=>s.name).sort(),['Krmizi','ShoofLive']);
+ assert.deepEqual(Array.from(c.EXTRA_SOURCES,s=>s.name).sort(),['3ick','3skNews','Dailymotion','FaselHD','Qeseh','Qesset']);
  const all=c.SOURCES.concat(c.EXTRA_SOURCES);
  for(const removed of ['NOW','DDizi','TVDiziler']) assert(!all.some(s=>s.name===removed));
  assert(all.every(s=>String(s.language||'ar')==='ar'));
