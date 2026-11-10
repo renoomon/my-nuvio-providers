@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.23.0
+ * Version: 0.24.0
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
@@ -18,7 +18,7 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.23.0";
+var VERSION = "0.24.0";
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
   { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
@@ -450,10 +450,54 @@ function getTmdbHtmlMetadata(tmdbId) {
   });
 }
 
+/* Nuvio TV does not inject the TMDB key, and the website answers Cloudflare
+ * 403 to a bare fetch, so a keyless client used to resolve zero titles and
+ * return no links at all. Wikidata carries the TMDB id (P4983 series, P4947
+ * movie) with Arabic, Turkish and English labels and needs no key.
+ */
+var WIKIDATA_ENDPOINT = "https://query.wikidata.org/sparql";
+
+function wikidataTitles(tmdbId) {
+  var id = String(tmdbId || "").replace(/[^0-9]/g, "");
+  if (!id) return Promise.resolve([]);
+  function lookup(property) {
+    var query = 'SELECT ?label ?lang WHERE { ?item wdt:' + property + ' "' + id +
+      '" ; rdfs:label ?label . BIND(lang(?label) AS ?lang) FILTER(?lang IN ("ar","tr","en")) } LIMIT 20';
+    var url = WIKIDATA_ENDPOINT + "?format=json&query=" + encodeURIComponent(query);
+    return fetchJson(url, "", "").then(function (data) {
+      var rows = data && data.results && data.results.bindings || [], found = [];
+      for (var i = 0; i < rows.length; i++) {
+        var label = rows[i] && rows[i].label && rows[i].label.value;
+        if (label) found.push(String(label));
+      }
+      return found;
+    }).catch(function () { return []; });
+  }
+  return lookup("P4983").then(function (series) {
+    return series && series.length ? series : lookup("P4947");
+  });
+}
+
+function mergeTitleSources(htmlMetadata, keylessTitles) {
+  var titles = [], seen = {}, i;
+  var htmlTitles = htmlMetadata && htmlMetadata.titles || [];
+  for (i = 0; i < htmlTitles.length; i++) addTitle(titles, seen, htmlTitles[i]);
+  for (i = 0; i < (keylessTitles || []).length; i++) addTitle(titles, seen, keylessTitles[i]);
+  return {
+    titles: titles,
+    year: htmlMetadata && htmlMetadata.year || 0,
+    seasons: htmlMetadata && htmlMetadata.seasons || []
+  };
+}
+
 /* Nuvio supplies its TMDB key at runtime. Prefer JSON over the blocked website. */
 function getTmdbMetadata(tmdbId) {
   var key = typeof TMDB_API_KEY !== "undefined" ? String(TMDB_API_KEY || "").trim() : "";
-  if (!key) return getTmdbHtmlMetadata(tmdbId);
+  if (!key) {
+    return Promise.all([getTmdbHtmlMetadata(tmdbId), wikidataTitles(tmdbId)]).then(function (parts) {
+      return mergeTitleSources(parts[0], parts[1]);
+    });
+  }
   var languages = ["ar-SA", "tr-TR", "en-US"];
   var jobs = [];
   for (var i = 0; i < languages.length; i++) {
@@ -473,7 +517,11 @@ function getTmdbMetadata(tmdbId) {
       var aliases = data.alternative_titles && data.alternative_titles.results || [];
       for (var a = 0; a < aliases.length && titles.length < 50; a++) addTitle(titles, seen, aliases[a].title);
     }
-    if (!titles.length) return getTmdbHtmlMetadata(tmdbId);
+    if (!titles.length) {
+      return Promise.all([getTmdbHtmlMetadata(tmdbId), wikidataTitles(tmdbId)]).then(function (parts) {
+        return mergeTitleSources(parts[0], parts[1]);
+      });
+    }
     return { titles: titles, year: year, seasons: seasons };
   });
 }
@@ -1076,6 +1124,25 @@ function mediaTypeFromUrl(url) {
   return "";
 }
 
+/* A few media hosts answer 403 when a player attaches a Referer, while the
+ * bare request returns the file. Nuvio TV forwards stream headers to ExoPlayer,
+ * so binding a page referer here breaks playback on television even though the
+ * desktop client ignores it. Strip the page headers for those hosts only.
+ */
+var REFERER_SENSITIVE_HOSTS = ["grzcdn.com", "mwdy.club"];
+function mediaReferer(url, referer) {
+  var host = originOf(url).replace(/^https?:\/\//, "").toLowerCase();
+  for (var i = 0; i < REFERER_SENSITIVE_HOSTS.length; i++) {
+    var known = REFERER_SENSITIVE_HOSTS[i];
+    if (host === known || host.slice(-(known.length + 1)) === "." + known) return "";
+  }
+  return referer;
+}
+function mediaPlaybackHeaders(url, referer) {
+  var safe = mediaReferer(url, referer);
+  return requestHeaders(safe, safe ? originOf(safe) : "", "*/*");
+}
+
 function playbackHeaders(referer) {
   // These CDNs also check Accept-Language. Forward the same request profile
   // used during extraction instead of dropping it when handing off to Nuvio.
@@ -1085,7 +1152,7 @@ function playbackHeaders(referer) {
 function streamObject(url, referer, quality, serverName) {
   var resolvedQuality = quality || qualityFromText(url);
   var label = String(serverName || "Server").replace(/\s+/g, " ").trim();
-  var headers = playbackHeaders(referer);
+  var headers = mediaPlaybackHeaders(url, referer);
 
   var stream = {
     name: "Krmizi • " + label,
@@ -1257,7 +1324,7 @@ function responseHeader(response, name) {
  * with the same headers the player receives. Never download a whole MP4 here.
  */
 function probeMediaFile(url, referer, isMp4) {
-  var headers = playbackHeaders(referer);
+  var headers = mediaPlaybackHeaders(url, referer);
   if (!isMp4) headers.Range = "bytes=0-511";
   var work = Promise.resolve().then(function () {
     return fetch(url, { method: isMp4 ? "HEAD" : "GET", headers: headers, skipSizeCheck: true });
@@ -1306,7 +1373,8 @@ function validateMediaPlaylist(result, referer) {
 }
 
 function readMediaPlaylist(url, referer) {
-  return fetchTextInfo(url, referer, originOf(referer),
+  var safe = mediaReferer(url, referer);
+  return fetchTextInfo(url, safe, safe ? originOf(safe) : "",
     "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*")
     .then(function (result) {
       return validateMediaPlaylist(result, referer).then(function (valid) { return valid ? result : null; });
@@ -1326,7 +1394,8 @@ function addMediaEntry(entry, referer, serverName, streams, seenStreams) {
   if (!/\.m3u8(?:[?#]|$)/i.test(url)) {
     return probeMediaFile(url, referer, true).then(function (valid) { if (valid) add(url, declaredQuality); });
   }
-  return fetchTextInfo(url, referer, originOf(referer),
+  var safe = mediaReferer(url, referer);
+  return fetchTextInfo(url, safe, safe ? originOf(safe) : "",
     "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*")
     .then(function (result) {
       if (!isHlsPlaylistText(result.html)) return;
