@@ -1,6 +1,6 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.29.0
+ * Version: 0.30.0
  * Profile: fast
  *
  * Accuracy-first flow:
@@ -19,16 +19,16 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.29.0";
+var VERSION = "0.30.0";
 // Which half of the catalogs this build searches. scripts/build-profiles.js
 // copies this file and flips the next line to "archive" for krmizi-archive.js.
-var SOURCE_PROFILE = "fast";
+var SOURCE_PROFILE = "single";
 // The fast profile searches three catalogs, so it gets a tighter wall clock.
-var PROFILE_REQUEST_BUDGET = { fast: 5500, archive: 12000 };
+var REQUEST_BUDGET_MS = 12000;
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
-  { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website"], index: "/all-turkish-series/", profile: "archive" },
-  { name: "ShoofLive", bases: ["https://s6.shooflive.cyou", "https://s2.shooflive.cyou"], index: "/turkish-series/", profile: "archive" }
+  { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
+  { name: "ShoofLive", bases: ["https://s6.shooflive.cyou", "https://s2.shooflive.cyou"], index: "/turkish-series/" }
 ];
 var SITE_BASES = SOURCES[0].bases;
 var MAX_INDEX_PAGES = 3;
@@ -1756,11 +1756,11 @@ function arabicOnlyStreams(streams) {
 // TVDiziler) were removed in 0.15.0 because they cannot provide Arabic
 // translation; this provider returns Arabic-tagged streams only.
 var EXTRA_SOURCES = [
-  { name: "3skNews", bases: ["https://f1.q3sk.monster"], strategy: "extra", language: "ar", profile: "archive" },
-  { name: "Qeseh", bases: ["https://wwv.qeseh.com"], strategy: "extra", search: "qeseh", language: "ar", profile: "fast" },
-  { name: "FaselHD", bases: ["https://faselhd.watch"], strategy: "extra", search: "faselhd", language: "ar", profile: "archive" },
-  { name: "Dailymotion", bases: ["https://www.dailymotion.com"], strategy: "extra", search: "dailymotion", language: "ar", profile: "archive" },
-  { name: "3ick", bases: ["https://ww4.3ick.club"], strategy: "extra", search: "3ick", language: "ar", profile: "fast" }
+  { name: "3skNews", bases: ["https://f1.q3sk.monster"], strategy: "extra", language: "ar" },
+  { name: "Qeseh", bases: ["https://wwv.qeseh.com"], strategy: "extra", search: "qeseh", language: "ar" },
+  { name: "FaselHD", bases: ["https://faselhd.watch"], strategy: "extra", search: "faselhd", language: "ar" },
+  { name: "Dailymotion", bases: ["https://www.dailymotion.com"], strategy: "extra", search: "dailymotion", language: "ar" },
+  { name: "3ick", bases: ["https://ww4.3ick.club"], strategy: "extra", search: "3ick", language: "ar" }
 ];
 
 // The catalog prints its next numbered mirror whether or not that host
@@ -3044,21 +3044,16 @@ function resolveExtraSource(metadata, source, requests) {
 // providers/krmizi-archive.js is the same code with SOURCE_PROFILE flipped.
 // A source without a profile stays in both entries, so injected or future
 // catalogs are never dropped silently.
-function sourceInProfile(source, profile) {
-  return !source || !source.profile || source.profile === profile;
+function sourceInProfile() {
+  return true;
 }
 
-function sourcesForProfile(profile) {
-  var all = SOURCES.concat(typeof EXTRA_SOURCES !== "undefined" ? EXTRA_SOURCES : []);
-  var selected = [];
-  for (var i = 0; i < all.length; i++) {
-    if (sourceInProfile(all[i], profile)) selected.push(all[i]);
-  }
-  return selected;
+function sourcesForProfile() {
+  return SOURCES.concat(typeof EXTRA_SOURCES !== "undefined" ? EXTRA_SOURCES : []);
 }
 
-function profileRequestBudget(profile) {
-  return PROFILE_REQUEST_BUDGET[profile] || PROFILE_REQUEST_BUDGET.archive;
+function profileRequestBudget() {
+  return REQUEST_BUDGET_MS;
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
