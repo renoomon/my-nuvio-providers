@@ -110,6 +110,8 @@ test('primary with no media does not remove ShoofLive results', async () => {
     if (url.startsWith('https://www.qrmzi.tv/episode/')) return response('<h1>unavailable</h1>',url);
     return url.includes('qrmzi.tv') ? primary(url,opts) : backup(url,opts);
   }, {TMDB_API_KEY:'test-key'});
+  // Krmizi and ShoofLive both ship in the archive entry, not the fast one.
+  ctx.SOURCE_PROFILE = 'archive';
   const streams = await ctx.module.exports.getStreams('123','tv',2,1);
   assert.equal(streams[0].provider, 'ShoofLive');
   assert(calls.some(u => u.startsWith(base)));

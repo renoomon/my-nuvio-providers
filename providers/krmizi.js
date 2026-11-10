@@ -1,12 +1,13 @@
 /**
  * Krmizi / Qrmzi provider for Nuvio
- * Version: 0.26.0
+ * Version: 0.27.0
+ * Profile: fast
  *
  * Accuracy-first flow:
  * TMDB localized + alternative titles -> parallel source searches -> verified
  * series page -> exact episode inside that page -> page-owned player ->
  * AlbaPlayer servers for that episode only -> public HLS/MP4 sources.
- * Search Krmizi, ShoofLive and every extra catalog independently; combine every source result.
+ * Search each registered catalog independently; combine every source result.
  * Arabic translation is required: only Arabic-tagged streams are returned, and
  * the original-Turkish catalogs NOW, DDizi and TVDiziler are not registered.
  *
@@ -18,11 +19,16 @@
 
 var cheerio = require("cheerio-without-node-native");
 
-var VERSION = "0.26.0";
+var VERSION = "0.27.0";
+// Which half of the catalogs this build searches. scripts/build-profiles.js
+// copies this file and flips the next line to "archive" for krmizi-archive.js.
+var SOURCE_PROFILE = "fast";
+// The fast profile searches three catalogs, so it gets a tighter wall clock.
+var PROFILE_REQUEST_BUDGET = { fast: 5500, archive: 8000 };
 var TMDB_BASE = "https://www.themoviedb.org";
 var SOURCES = [
-  { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website"], index: "/all-turkish-series/" },
-  { name: "ShoofLive", bases: ["https://s6.shooflive.cyou", "https://s2.shooflive.cyou"], index: "/turkish-series/" }
+  { name: "Krmizi", bases: ["https://v7.qrmzi.buzz", "https://v6.qrmzi.buzz", "https://v2.qrmzi.website"], index: "/all-turkish-series/", profile: "archive" },
+  { name: "ShoofLive", bases: ["https://s6.shooflive.cyou", "https://s2.shooflive.cyou"], index: "/turkish-series/", profile: "archive" }
 ];
 var SITE_BASES = SOURCES[0].bases;
 var MAX_INDEX_PAGES = 3;
@@ -1750,12 +1756,12 @@ function arabicOnlyStreams(streams) {
 // TVDiziler) were removed in 0.15.0 because they cannot provide Arabic
 // translation; this provider returns Arabic-tagged streams only.
 var EXTRA_SOURCES = [
-  { name: "3skNews", bases: ["https://f1.q3sk.monster"], strategy: "extra", language: "ar" },
-  { name: "Qeseh", bases: ["https://wwv.qeseh.com"], strategy: "extra", search: "qeseh", language: "ar" },
-  { name: "Qesset", bases: ["https://qesset.com", "https://www.qesset.com"], strategy: "extra", search: "qeseh", language: "ar" },
-  { name: "FaselHD", bases: ["https://faselhd.watch"], strategy: "extra", search: "faselhd", language: "ar" },
-  { name: "Dailymotion", bases: ["https://www.dailymotion.com"], strategy: "extra", search: "dailymotion", language: "ar" },
-  { name: "3ick", bases: ["https://ww4.3ick.club"], strategy: "extra", search: "3ick", language: "ar" }
+  { name: "3skNews", bases: ["https://f1.q3sk.monster"], strategy: "extra", language: "ar", profile: "archive" },
+  { name: "Qeseh", bases: ["https://wwv.qeseh.com"], strategy: "extra", search: "qeseh", language: "ar", profile: "fast" },
+  { name: "Qesset", bases: ["https://qesset.com", "https://www.qesset.com"], strategy: "extra", search: "qeseh", language: "ar", profile: "archive" },
+  { name: "FaselHD", bases: ["https://faselhd.watch"], strategy: "extra", search: "faselhd", language: "ar", profile: "archive" },
+  { name: "Dailymotion", bases: ["https://www.dailymotion.com"], strategy: "extra", search: "dailymotion", language: "ar", profile: "archive" },
+  { name: "3ick", bases: ["https://ww4.3ick.club"], strategy: "extra", search: "3ick", language: "ar", profile: "fast" }
 ];
 
 // The catalog prints its next numbered mirror whether or not that host
@@ -3035,6 +3041,27 @@ function resolveExtraSource(metadata, source, requests) {
 }
 // END EXTRA SOURCE ADAPTERS
 
+// The entry is split in two: this file searches the fast catalogs, and
+// providers/krmizi-archive.js is the same code with SOURCE_PROFILE flipped.
+// A source without a profile stays in both entries, so injected or future
+// catalogs are never dropped silently.
+function sourceInProfile(source, profile) {
+  return !source || !source.profile || source.profile === profile;
+}
+
+function sourcesForProfile(profile) {
+  var all = SOURCES.concat(typeof EXTRA_SOURCES !== "undefined" ? EXTRA_SOURCES : []);
+  var selected = [];
+  for (var i = 0; i < all.length; i++) {
+    if (sourceInProfile(all[i], profile)) selected.push(all[i]);
+  }
+  return selected;
+}
+
+function profileRequestBudget(profile) {
+  return PROFILE_REQUEST_BUDGET[profile] || PROFILE_REQUEST_BUDGET.archive;
+}
+
 function getStreams(tmdbId, mediaType, season, episode) {
   var type = String(mediaType || "").toLowerCase();
   var wantedSeason = parseInt(season, 10);
@@ -3049,13 +3076,14 @@ function getStreams(tmdbId, mediaType, season, episode) {
 
   log("tmdb_id", id);
   log("request", "S" + wantedSeason + "E" + wantedEpisode);
-  resetRequestBudget(8000);
+  log("profile", SOURCE_PROFILE);
+  resetRequestBudget(profileRequestBudget(SOURCE_PROFILE));
 
   var collected = [];
   var pipeline = getTmdbMetadata(id).then(function (metadata) {
     log("titles", metadata.titles.join(" | "));
     if (!metadata.titles.length) { logFailure("tmdb_metadata_not_found"); return []; }
-    var sources = SOURCES.concat(typeof EXTRA_SOURCES !== "undefined" ? EXTRA_SOURCES : []);
+    var sources = sourcesForProfile(SOURCE_PROFILE);
     var jobs = sources.map(function (source) {
       log("source", source.name);
       var work = Promise.resolve().then(function () {
