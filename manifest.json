@@ -1,6 +1,6 @@
 {
   "name": "My Nuvio Providers",
-  "version": "1.26.0",
+  "version": "1.27.0",
   "description": "Parallel Arabic-subtitled Turkish series catalogs and archive search",
   "author": "renoomon",
   "scrapers": [
@@ -8,8 +8,8 @@
       "id": "krmizi",
       "name": "مسلسلات تركية · سريع",
       "description": "كتالوجات عربية مترجمة سريعة: 3ick وقصة عشق",
-      "version": "0.28.0",
-      "filename": "providers/krmizi.js?v=0.28.0",
+      "version": "0.29.0",
+      "filename": "providers/krmizi.js?v=0.29.0",
       "supportedTypes": [
         "tv"
       ],
@@ -29,8 +29,8 @@
       "id": "krmizi-archive",
       "name": "مسلسلات تركية · أرشيف",
       "description": "أرشيف إضافي أعمق: قرمزي وشوف لايف و3sk وفاصل HD وDailymotion",
-      "version": "0.28.0",
-      "filename": "providers/krmizi-archive.js?v=0.28.0",
+      "version": "0.29.0",
+      "filename": "providers/krmizi-archive.js?v=0.29.0",
       "supportedTypes": [
         "tv"
       ],

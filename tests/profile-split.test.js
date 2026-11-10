@@ -36,8 +36,8 @@ test('no catalog is lost or duplicated between the two profiles',()=>{
 test('each profile uses its own request budget',()=>{
   const ctx=runtime();
   assert.equal(ctx.profileRequestBudget('fast'),5500);
-  assert.equal(ctx.profileRequestBudget('archive'),8000);
-  assert.equal(ctx.profileRequestBudget('unknown'),8000);
+  assert.equal(ctx.profileRequestBudget('archive'),12000);
+  assert.equal(ctx.profileRequestBudget('unknown'),12000);
 });
 
 async function attemptedSources(profile) {
